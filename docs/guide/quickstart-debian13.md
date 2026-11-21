@@ -2253,10 +2253,13 @@ QUIC — только с отдельным переключателем «naive
 
   | Команда | По умолчанию | Что делает |
   |---|---|---|
-  | `rayctl service set hy2-masq up_mbps=500` | нет потолка | нода шлёт одному соединению не быстрее 500 Мбит/с |
-  | `rayctl service set hy2-masq down_mbps=200` | нет потолка | потолок отдачи клиента в сторону ноды |
+  | `rayctl service set hy2-masq up_mbps=500` | скорость порта ноды от 1 Гбит/с, если ядро её знает; иначе нет потолка и предупреждение в `rayctl status` | нода шлёт одному соединению не быстрее 500 Мбит/с; поставьте скорость канала VPS |
+  | `rayctl service set hy2-masq down_mbps=200` | нет потолка | предел отдачи клиента, который нода ему сообщает: послушный клиент шлёт не быстрее |
 
-  Значение `0` снимает потолок. `rayctl apply` не нужен: `rayd` перезапустит сервис сам.
+  `up_mbps=0` — без потолка совсем, `up_mbps=auto` — снова по скорости порта; `down_mbps=0` снимает его предел.
+  Скорость порта `rayd` читает один раз и помнит до перезапуска: после смены порта или карты — `systemctl restart
+  rayd`. Скорость моста, veth и tun (контейнер, LXC) не берётся: они сообщают свою, не канала. Какой потолок взят и
+  откуда — строка `node WARNING` в `rayctl status`. `rayctl apply` не нужен: `rayd` перезапустит сервис сам.
 
 ### naive (`naive`)
 
@@ -2735,8 +2738,8 @@ AllowedPublicKeys: [
 | **Новое имя сервера по расписанию без wildcard** (naive и REALITY, с v0.29.0) | смена имени раз в 90 дней и при сертификате через HTTP-01 | выкл.: без wildcard-сертификата имя меняется только командой | группа или admin-устройство | `rayctl service set naive rotate_sni=on` (REALITY — так же) | `rayctl service list`, столбец `KEYS` | следующее имя видно в журналах CT всю эпоху, в одном списке с остальными именами ноды |
 | **Пиры Yggdrasil** (публичные или свой) | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8, «Свой пир») | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
 | **TCP 443 без SPA** | REALITY отвечает всем: молчащий на 443 хост заметнее | за SPA | группа или admin-устройство | `rayctl service set reality open=true` | `rayctl -json service list` — у reality `open` | активное зондирование 443 становится возможным и для naive, DoH и Yggdrasil |
-| **Потолки Hysteria2** | ограничить скорость одного соединения | нет | группа или admin-устройство | `rayctl service set hy2-masq up_mbps=500` | в выводе команды | — |
-| **PIN у приглашения** | QR без PIN бесполезен | без PIN | тот, кто делает приглашение | `rayctl device invite … -pin` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
+| **Потолки Hysteria2** | ограничить скорость одного соединения | `up_mbps` — скорость порта ноды от 1 Гбит/с, если ядро её знает (с v0.35.1) | группа или admin-устройство | `rayctl service set hy2-masq up_mbps=500` (`0` — без потолка, `auto` — по порту) | в выводе команды; без потолка — `rayctl status` | без потолка один клиент может занять весь канал |
+| **PIN у приглашения** | QR без PIN бесполезен | без PIN; у `-role admin` и `billing` — с PIN (с v0.35.1) | тот, кто делает приглашение | `rayctl device invite … -pin`, без него — `-pin=false` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
 | **Имя и описание ноды** | текст, который клиенты показывают пользователям | нет | группа или admin-устройство | `rayctl node name "…"`, `rayctl node note "…"` | `rayctl node name`, `rayctl node note` без аргументов | — |
 | **Метрики для Prometheus** | счётчики ноды в файл для node_exporter | не пишутся | группа; полный набор — root | `rayctl metrics -o ФАЙЛ` по своему таймеру | содержимое файла | только числа, без имён и адресов |
 
@@ -3002,6 +3005,9 @@ rayctl device invite u-k3f9-x2qa admin-phone -role admin -ttl 30m -qr -pin
 rayctl device invite u-k3f9-x2qa laptop -role admin -ttl 30m -o /root/laptop.inv
 ```
 
+С v0.35.1 у приглашения `-role admin` есть PIN: команда показывает его один раз, в файл он не попадает. Запомните
+его или перенесите другим путём, чем файл.
+
 Перенесите файл на свою машину, где есть `rayctl` (Linux — из архива релиза; macOS и FreeBSD — из своих архивов,
 §7), и удалите его на ноде:
 
@@ -3009,7 +3015,8 @@ rayctl device invite u-k3f9-x2qa laptop -role admin -ttl 30m -o /root/laptop.inv
 shred -u /root/laptop.inv
 ```
 
-На своей машине приглашение читается из файла — так оно не попадает в историю оболочки и в список процессов:
+На своей машине приглашение читается из файла — так оно не попадает в историю оболочки и в список процессов. PIN
+`rayctl` спросит на терминале сам:
 
 ```bash
 ./rayctl remote enroll -o laptop.rcdev @laptop.inv

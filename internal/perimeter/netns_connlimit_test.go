@@ -278,7 +278,7 @@ func TestNetnsInboundRate(t *testing.T) {
 	if err := fw.SetAdmin([]netip.Prefix{netip.MustParsePrefix("192.0.2.3/32")}, []Port{{"tcp", 22}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fw.Allow(netip.MustParseAddr("192.0.2.2"), []Port{{"udp", 18443}}, time.Minute); err != nil {
+	if err := fw.SetGrants(grantsOf(netip.MustParseAddr("192.0.2.2"), []Port{{"udp", 18443}}, time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", ":18443")
@@ -423,7 +423,7 @@ func TestNetnsInboundRateRelay(t *testing.T) {
 	if out, _ := exec.Command("nft", "list", "set", "inet", Table, "in4").CombinedOutput(); strings.Contains(string(out), "198.51.100.2") {
 		t.Fatalf("a packet without a grant spent the bucket:\n%s", out)
 	}
-	if err := fw.Allow(src, []Port{{"tcp", 443}}, time.Minute); err != nil {
+	if err := fw.SetGrants(grantsOf(src, []Port{{"tcp", 443}}, time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
 	synsFrom(t, client, src, relay, 150, 300*time.Millisecond)

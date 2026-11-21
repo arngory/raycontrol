@@ -310,6 +310,18 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		return svc, err
 	}
 
+	if svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs" {
+		// The ceilings as service set takes them: settings written by
+		// hand pass no other check (second review of the protocol
+		// review's change).
+		for _, key := range []string{"up_mbps", "down_mbps"} {
+			if v, ok := settings[key]; ok {
+				if f, num := v.(float64); !num || f != float64(int(f)) || f < 0 || f > MbpsMax {
+					return svc, fmt.Errorf("%w %s %v: Mbit/s, a whole number from 0 to %d", store.ErrInvalid, key, v, MbpsMax)
+				}
+			}
+		}
+	}
 	switch svc.Kind {
 	case "dnstt", "masterdns":
 		if a, ok := settings["auth"]; ok && !slices.Contains([]any{"off", "optional", "required"}, a) {
@@ -955,15 +967,27 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, err
 		}
 		v = value
+	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && key == "up_mbps" && value == "auto":
+		// Back to the default: the speed of the node's link where the
+		// kernel knows it (render.BrutalCeiling).
+		v = 0
 	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
 		// The ceilings of the server's Brutal per connection (R4-16): up is
 		// what the node sends a client at most (the node's channel or its
-		// tariff), down what a client may send it; 0 removes the ceiling.
+		// tariff), down what the node tells clients to send it at most.
+		// down 0 removes it; up 0 is kept, none instead of the default
+		// (protocol review 2026-11, M1).
 		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 || n > 100000 {
+		if err != nil || n < 0 || n > MbpsMax {
+			if key == "up_mbps" {
+				return svc, fmt.Errorf("%w up_mbps: Mbit/s, 0 to 100000 (0: none; auto: the speed of the node's link, the default)", store.ErrInvalid)
+			}
 			return svc, fmt.Errorf("%w %s: Mbit/s, 0 to 100000 (0: none)", store.ErrInvalid, key)
 		}
 		v = n
+		if key == "up_mbps" && n == 0 {
+			v = json.Number("0")
+		}
 	case svc.Kind == "yggdrasil" && key == "peers":
 		// Public peers (P-14, R4-18): off unless set; none removes them.
 		v = 0
@@ -1847,4 +1871,18 @@ func EnsureQUICResetKey(ctx context.Context, st *store.Store, svc store.Service,
 		return nil, err
 	}
 	return st.InitServiceSecret(ctx, svc.ID, SecretQUICReset, k)
+}
+
+// MbpsMax is the most a Hysteria2 ceiling takes, Mbit/s: niko-server
+// multiplies it into bit/s, and a larger number overflows there.
+const MbpsMax = 100000
+
+// MbpsSetting reads a ceiling of a service's settings, as JSON: a whole
+// number from 0 to MbpsMax, else none (ok false).
+func MbpsSetting(raw json.RawMessage) (int, bool) {
+	n, err := strconv.Atoi(string(raw))
+	if err != nil || n < 0 || n > MbpsMax {
+		return 0, false
+	}
+	return n, true
 }

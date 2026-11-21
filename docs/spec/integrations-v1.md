@@ -61,9 +61,9 @@ integration status`. Дальше — события (§4).
 
 ```
 rayctl user add integrations -services ""          # служебный пользователь без сервисов
-rayctl device invite integrations billing -role billing [-allow 198.51.100.7,2001:db8:7::/64] [-ttl 1h] [-pin]
-# на хосте интеграции:
-rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройства 0600: rcdev1 и PEM ключа (api-v1 §4)
+rayctl device invite integrations billing -role billing [-allow 198.51.100.7,2001:db8:7::/64] [-ttl 1h] [-pin=false]
+# на хосте интеграции (PIN у billing по умолчанию, api-v1 §3; на терминале rayctl спросит его сам):
+rayctl remote enroll -o billing.rcdev 'RCINV3:…'   # файл устройства 0600: rcdev1 и PEM ключа (api-v1 §4)
 ```
 
 - Приглашение с ролью `billing` или `support` делают root и группа `raycontrol` на ноде и admin-устройства.
@@ -120,7 +120,7 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 
 | Метод | admin | billing | support | Почему так |
 |---|---|---|---|---|
-| `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, текстов `loops[].error` и `detail` |
+| `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, `egress`, `warnings`, текстов `loops[].error` и `detail` |
 | `ListUsers` | да | да (обычные) | да* (обычные) | состояние и счётчики трафика; *`support` — без `note`, пока администратор не разрешил (§2.2) |
 | `CreateUser` | да | да | — | сервисы — только данных (§2.2) |
 | `SetUserEnabled` | да | да* | — | *выключение — под предохранителем (§2.4) |
@@ -892,7 +892,7 @@ HTTPS, хоть статический хостинг: команды подпи
 ## 11. rayctl, статус, метрики
 
 ```
-rayctl device invite USER NAME -role billing|support [-allow ADDRS] [-ttl 1h] [-pin]
+rayctl device invite USER NAME -role billing|support [-allow ADDRS] [-ttl 1h] [-pin[=false]]   # billing — с PIN, пока не -pin=false
 rayctl device allow ID ADDRS | -clear
 rayctl device list                               # ROLE, ACCESS, LAST CALL
 rayctl integration status                        # по устройствам интеграций: вызовы, отказы, превышения за сутки

@@ -24,37 +24,38 @@ import (
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fakeFW struct {
-	mu         sync.Mutex
-	udp, tcp   []uint16
-	public     []Port
-	admin      []netip.Prefix
-	adminPorts []Port
-	integ      []netip.Prefix
-	integPorts []Port
-	relays     []netip.Prefix
-	relayPorts []Port
-	forward    []Port
-	rot        map[uint16]uint16
-	open       map[string]time.Duration // "addr port" -> ttl
-	gone       bool                     // table removed behind the gate's back
-	setups     int
-	acmePort   uint16
-	acmeTTL    time.Duration
-	acmeFwd    time.Duration  // a relay's forward of TCP 80 (SetACMEForward)
-	acmeFwds   int            // SetACMEForward calls
-	relaysSets int            // SetRelays calls
-	adminFails int            // SetAdmin calls still to fail
-	spaFails   int            // SetSPAPorts calls still to fail
-	denyFails  int            // Deny calls still to fail
-	allowFails int            // Allow calls still to fail
-	allowCall  int            // Allow calls so far
-	failAllow  int            // the Allow call that fails (1-based), 0: none
-	denies     int            // Deny calls
-	failing    map[string]int // SetPublic, SetRelays, SetForward, SetACME calls still to fail
-	calls      []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, SetEgress, in order
-	egress     *Egress        // the egress policy in force; nil: none, as in a new table
-	inLimitOff bool           // the per-address limit is off (a new table has it on)
-	guard      bool           // the guard refuses (a new table: not)
+	mu           sync.Mutex
+	udp, tcp     []uint16
+	public       []Port
+	admin        []netip.Prefix
+	adminPorts   []Port
+	integ        []netip.Prefix
+	integPorts   []Port
+	relays       []netip.Prefix
+	relayPorts   []Port
+	forward      []Port
+	rot          map[uint16]uint16
+	open         map[string]time.Duration // "addr port" -> ttl
+	gone         bool                     // table removed behind the gate's back
+	setups       int
+	acmePort     uint16
+	acmeTTL      time.Duration
+	acmeFwd      time.Duration  // a relay's forward of TCP 80 (SetACMEForward)
+	acmeFwds     int            // SetACMEForward calls
+	relaysSets   int            // SetRelays calls
+	adminFails   int            // SetAdmin calls still to fail
+	spaFails     int            // SetSPAPorts calls still to fail
+	denyFails    int            // Deny calls still to fail
+	allowFails   int            // Allow calls still to fail
+	allowCall    int            // Allow calls so far
+	failAllow    int            // the Allow call that fails (1-based), 0: none
+	denies       int            // Deny calls
+	transactions int            // SetGrants calls
+	failing      map[string]int // SetPublic, SetRelays, SetForward, SetACME calls still to fail
+	calls        []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, SetEgress, in order
+	egress       *Egress        // the egress policy in force; nil: none, as in a new table
+	inLimitOff   bool           // the per-address limit is off (a new table has it on)
+	guard        bool           // the guard refuses (a new table: not)
 }
 
 func (f *fakeFW) SetACMEForward(ttl time.Duration) error {
@@ -204,37 +205,62 @@ func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
 	f.calls = append(f.calls, "SetRelays")
 	return nil
 }
-func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
+
+// SetGrants is one transaction: what fails changes nothing. A call with
+// grants to open counts as an Allow, one with elements to close as a
+// Deny, and fails as either.
+func (f *fakeFW) SetGrants(allow []Grant, deny []Elem) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.allowCall++
-	if f.allowFails > 0 || f.allowCall == f.failAllow {
-		if f.allowFails > 0 {
-			f.allowFails--
+	if len(allow)+len(deny) == 0 {
+		return nil
+	}
+	f.transactions++
+	if len(allow) > 0 {
+		f.allowCall++
+		if f.allowFails > 0 || f.allowCall == f.failAllow {
+			if f.allowFails > 0 {
+				f.allowFails--
+			}
+			return errors.New("nft: busy")
 		}
-		return errors.New("nft: busy")
+	}
+	if len(deny) > 0 {
+		f.denies++
+		if f.denyFails > 0 {
+			f.denyFails--
+			return errors.New("nft: busy")
+		}
+	}
+	if err := checkTTLs(allow); err != nil {
+		return err
 	}
 	if f.open == nil {
 		f.open = map[string]time.Duration{}
 	}
-	for _, p := range ports {
-		f.open[a.String()+" "+p.String()] = ttl
+	for _, e := range deny {
+		delete(f.open, e.Addr.Unmap().String()+" "+e.Port.String())
 	}
-	f.calls = append(f.calls, "Allow")
+	opened := map[string]bool{}
+	for _, gr := range allow {
+		k := gr.Addr.Unmap().String() + " " + gr.Port.String()
+		if opened[k] {
+			f.open[k] = max(f.open[k], gr.TTL) // as NFT: one opened twice gets the longer
+			continue
+		}
+		opened[k] = true
+		f.open[k] = gr.TTL
+	}
+	if len(allow) > 0 {
+		f.calls = append(f.calls, "Allow")
+	}
 	return nil
 }
-func (f *fakeFW) Deny(a netip.Addr, ports []Port) error {
+func (f *fakeFW) ttl(k grantKey) (time.Duration, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.denies++
-	if f.denyFails > 0 {
-		f.denyFails--
-		return errors.New("nft: busy")
-	}
-	for _, p := range ports {
-		delete(f.open, a.String()+" "+p.String())
-	}
-	return nil
+	d, ok := f.open[k.addr.String()+" "+k.port.String()]
+	return d, ok
 }
 func (f *fakeFW) isOpen(k string) bool {
 	f.mu.Lock()
@@ -780,14 +806,52 @@ func TestRuleset(t *testing.T) {
 	if strings.Contains((&NFT{FilterLoopback: true}).Ruleset(), `iif "lo" accept`) {
 		t.Error("loopback accepted in test mode")
 	}
-	set, elems := elements(netip.MustParseAddr("::ffff:192.0.2.1"), []Port{{"tcp", 443}}, 10*time.Minute)
-	if set != "allow4" || elems != "192.0.2.1 . tcp . 443 timeout 600s" {
-		t.Errorf("mapped v4: %s %s", set, elems)
+	var b strings.Builder
+	addGrants(&b, []Grant{
+		{netip.MustParseAddr("::ffff:192.0.2.1"), Port{"tcp", 443}, 10 * time.Minute},
+		{netip.MustParseAddr("2001:db8::1"), Port{"udp", 443}, 1500 * time.Millisecond},
+		{netip.MustParseAddr("192.0.2.2"), Port{"udp", 443}, 0},
+	})
+	if want := "add element inet raycontrol allow4 { 192.0.2.1 . tcp . 443 timeout 600s, 192.0.2.2 . udp . 443 timeout 1s }\n" +
+		"add element inet raycontrol allow6 { 2001:db8::1 . udp . 443 timeout 2s }\n"; b.String() != want {
+		t.Errorf("grants:\n%s", b.String())
 	}
-	set, _ = elements(netip.MustParseAddr("2001:db8::1"), []Port{{"udp", 443}}, 0)
-	if set != "allow6" {
-		t.Errorf("v6 set %s", set)
+	if _, err := (&NFT{}).grantsScript([]Grant{{netip.MustParseAddr("192.0.2.2"), Port{"udp", 443}, 999 * time.Millisecond}}, nil); err == nil {
+		t.Error("a grant under a second: no error")
 	}
+	s, err := (&NFT{destroy: true}).grantsScript([]Grant{{netip.MustParseAddr("192.0.2.1"), Port{"tcp", 443}, time.Minute}},
+		[]Elem{{netip.MustParseAddr("192.0.2.3"), Port{"udp", 443}}})
+	if want := "destroy element inet raycontrol allow4 { 192.0.2.3 . udp . 443, 192.0.2.1 . tcp . 443 }\n" +
+		"add element inet raycontrol allow4 { 192.0.2.1 . tcp . 443 timeout 60s }\n"; err != nil || s != want {
+		t.Errorf("one transaction:\n%s %v", s, err)
+	}
+	// Each element once, without "destroy element" above all: a second
+	// delete of one fails the transaction. One opened twice gets the
+	// longer; one both opened and closed is opened.
+	a := netip.MustParseAddr("192.0.2.1")
+	s, err = (&NFT{}).grantsScript([]Grant{{a, Port{"tcp", 443}, time.Minute}, {netip.MustParseAddr("::ffff:192.0.2.1"), Port{"tcp", 443}, time.Hour}},
+		[]Elem{{a, Port{"tcp", 443}}, {a, Port{"udp", 443}}, {a, Port{"udp", 443}}})
+	if want := "add element inet raycontrol allow4 { 192.0.2.1 . udp . 443 timeout 1s, 192.0.2.1 . tcp . 443 timeout 1s }\n" +
+		"delete element inet raycontrol allow4 { 192.0.2.1 . udp . 443, 192.0.2.1 . tcp . 443 }\n" +
+		"add element inet raycontrol allow4 { 192.0.2.1 . tcp . 443 timeout 3600s }\n"; err != nil || s != want {
+		t.Errorf("duplicates:\n%s %v", s, err)
+	}
+}
+
+func grantsOf(a netip.Addr, ports []Port, ttl time.Duration) []Grant {
+	out := make([]Grant, len(ports))
+	for i, p := range ports {
+		out[i] = Grant{a, p, ttl}
+	}
+	return out
+}
+
+func elemsOf(a netip.Addr, ports []Port) []Elem {
+	out := make([]Elem, len(ports))
+	for i, p := range ports {
+		out[i] = Elem{a, p}
+	}
+	return out
 }
 
 // A relay is one address (relay-v1 §3): a wider prefix in the snapshot is
@@ -955,7 +1019,7 @@ func TestGateRevocations(t *testing.T) {
 	const grant = "203.0.113.9 udp/443"
 	knock()
 	alice.Allowed = nil
-	fw.denyFails = 2 // both of alice's ports
+	fw.denyFails = 1 // both of alice's ports, one transaction
 	if err := g.Update(snap); !errors.Is(err, ErrPending) || !fw.isOpen(grant) {
 		t.Fatalf("a refused revocation: open %v, %v", fw.isOpen(grant), err)
 	}
@@ -1186,7 +1250,7 @@ func TestGateSharedAddressMore(t *testing.T) {
 	knock(0x11, time.Hour)
 	knock(0x22, 2*time.Second)
 	alice.Allowed = nil
-	fw.allowFails = 4 // two ports, twice: bob expires and goes between the tries
+	fw.allowFails = 2 // two ports in one transaction, twice: bob expires and goes between the tries
 	if err := g.Update(snap); !errors.Is(err, ErrPending) {
 		t.Fatal(err)
 	}
@@ -1202,8 +1266,9 @@ func TestGateSharedAddressMore(t *testing.T) {
 		t.Fatal("a revoked device's time stayed on the grant")
 	}
 
-	// A knock opened in part (the second Allow refused) is held in part:
-	// revoking alice closes what did open.
+	// A knock is one transaction: refused, it opens nothing and holds
+	// nothing (fourth review: one per end, the second refused, held a port
+	// that the device's addresses did not count).
 	alice.Allowed = []uint32{2}
 	bob.Allowed = []uint32{1} // tcp/443 only
 	if err := g.Update(snap); err != nil {
@@ -1212,9 +1277,15 @@ func TestGateSharedAddressMore(t *testing.T) {
 	if err := knock(0x22, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	fw.failAllow = fw.allowCall + 2
+	fw.failAllow = fw.allowCall + 1
 	if err := knock(0x11, 5*time.Minute); err == nil {
-		t.Fatal("a knock opened in part said nothing")
+		t.Fatal("a refused knock said nothing")
+	}
+	if _, open := ttl(udp); open || g.holders[grantKey{netip.MustParseAddr("203.0.113.9"), Port{"udp", 443}}]["alice"] != (time.Time{}) {
+		t.Fatalf("a refused knock opened or held udp/443: %v", fw.open)
+	}
+	if err := knock(0x11, 5*time.Minute); err != nil {
+		t.Fatal(err)
 	}
 	alice.Allowed = nil
 	if err := g.Update(snap); err != nil {
@@ -1326,5 +1397,23 @@ func TestGateRevokeWhileRestoring(t *testing.T) {
 	fw.failing = map[string]int{"SetPublic": 100}
 	if err := g.Update(snap); !errors.Is(err, ErrPending) || len(fw.relays) != 0 || len(fw.relayPorts) != 1 {
 		t.Fatalf("a relay removed while its port waits: relays %v ports %v %v", fw.relays, fw.relayPorts, err)
+	}
+}
+
+// nft echoes the command it refused, a client's address in it: the error
+// that goes to the journal holds none (third review of the protocol
+// review's change, R4-3).
+func TestNFTErrorNoAddrs(t *testing.T) {
+	stderr := "/dev/stdin:1:1-63: Error: Could not process rule: No such file or directory\n" +
+		"destroy element inet raycontrol allow4 { 198.51.100.7 . tcp . 443 }\n" +
+		"destroy element inet raycontrol allow6 { 2001:db8:7:7::1 . udp . 443 }"
+	got := noAddrs(stderr)
+	for _, a := range []string{"198.51.100.7", "2001:db8:7:7::1"} {
+		if strings.Contains(got, a) {
+			t.Fatalf("%s kept: %s", a, got)
+		}
+	}
+	if !strings.Contains(got, "No such file or directory") || !strings.Contains(got, "allow4") {
+		t.Fatalf("the rest lost: %s", got)
 	}
 }

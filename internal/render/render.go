@@ -183,6 +183,10 @@ type Model struct {
 	// debug level. Xray stays at warning: at info it logs the users'
 	// destinations.
 	Debug bool
+	// LinkMbps is the speed of the node's link, Mbit/s, 0 when unknown
+	// (HostLink): the ceiling of Hysteria2's Brutal where up_mbps is not
+	// set. Only CollectForRender fills it.
+	LinkMbps int
 	// QUICCIDKey is the node's secret of routable connection IDs
 	// (docs/spec/quic-cid-route-v1.md): the front reads the labels of its
 	// QUIC backends' connection IDs with it, and they make them.
@@ -388,6 +392,7 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 	if err != nil {
 		return m, err
 	}
+	m.LinkMbps, _ = HostLink()
 	var params spa.Params
 	var devices []spa.Device
 	var checkKey []byte
@@ -1909,15 +1914,17 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	dir := path.Join(p.Rendered, s.Name)
 	options := map[string]any{}
 	// The ceilings of the server's Brutal (R4-16): it sends at min(up_mbps,
-	// the client's rate), BBR without the client's; down_mbps caps clients.
+	// the rate the client asks for), BBR when the client names none;
+	// up_mbps unset, the speed of the node's link (BrutalCeiling).
+	// down_mbps the node tells clients as its own receive rate: a client
+	// that follows it sends no faster, nothing makes it.
+	if up, _ := BrutalCeiling(s.Settings, m.LinkMbps); up > 0 {
+		options["up_mbps"] = up
+	}
 	var ceil struct {
-		Up   int `json:"up_mbps"`
 		Down int `json:"down_mbps"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &ceil)
-	if ceil.Up > 0 {
-		options["up_mbps"] = ceil.Up
-	}
 	if ceil.Down > 0 {
 		options["down_mbps"] = ceil.Down
 	}

@@ -241,7 +241,9 @@ func TestRejects(t *testing.T) {
 		if _, err := v.Verify(good); err != nil {
 			t.Fatal(err)
 		}
+		// Both clocks a minute on: the nonce is forgotten, its packet stale.
 		v.now = func() time.Time { return now.Add(2*MaxSkew + time.Second) }
+		v.since = func() time.Duration { return knockWindow + time.Second }
 		if _, err := v.Verify(good); !errors.Is(err, ErrStale) {
 			t.Fatalf("err = %v", err)
 		}
@@ -370,5 +372,236 @@ func TestActivePorts(t *testing.T) {
 	s := p.Slot(now)
 	if !slices.Contains(ports, p.Port(s-1)) || !slices.Contains(ports, p.Port(s)) || !slices.Contains(ports, p.Port(s+1)) {
 		t.Fatalf("ports %v miss a neighbour slot", ports)
+	}
+}
+
+// One device's knocks count against its quota for a minute: past it that
+// device is refused, others pass, and its quota frees as its knocks age.
+// Knocks refused for their scope count as well.
+func TestDeviceQuota(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock, mono := now, time.Duration(0)
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	for i := range DeviceNonces {
+		// Half of them for a service the device may not open.
+		req := Request{Time: clock}
+		if i%2 == 1 {
+			req.Scope = []uint16{9}
+		}
+		if _, err := v.Verify(seal(t, 0x11, req)); err != nil && !errors.Is(err, ErrScope) {
+			t.Fatalf("knock %d: %v", i, err)
+		}
+	}
+	if g, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrQuota) || g.DeviceID != "a" || g.Scope != nil {
+		t.Fatalf("over the quota: %+v, err = %v", g, err)
+	}
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatalf("another device: %v", err)
+	}
+	clock, mono = now.Add(knockWindow), knockWindow
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+		t.Fatalf("after its knocks aged: %v", err)
+	}
+	// b's knock came at the same time: gone with a's, nonces and counts.
+	if _, ok := v.perDevice["b"]; len(v.seen) != 1 || v.perDevice["a"] != 1 || ok {
+		t.Fatalf("cache: %d nonces, a %d, b %d", len(v.seen), v.perDevice["a"], v.perDevice["b"])
+	}
+}
+
+// The cache forgets each nonce when its packet can no longer pass the skew
+// check, and refuses a replay before then.
+func TestReplayCacheOrder(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock := now
+	mono := time.Duration(0)
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 3)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1)})
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	clock, mono = now.Add(MaxSkew), MaxSkew
+	for range 2 {
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replay: err = %v", err)
+	}
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrBusy) {
+		t.Fatalf("cache full: err = %v", err)
+	}
+	// The first one's time passes on both clocks: one place frees, the
+	// others stay.
+	clock, mono = now.Add(knockWindow), knockWindow
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+		t.Fatalf("after the first expired: %v", err)
+	}
+	if len(v.seen) != 3 {
+		t.Fatalf("cache: %d nonces", len(v.seen))
+	}
+}
+
+// The wall clock steps back an hour: a packet taken before is still a
+// replay when the clock comes back to its time, and the devices' quotas,
+// on the monotonic clock, go on as ever (protocol review 2026-11).
+func TestReplayCacheClockBack(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock, mono := now, time.Duration(0)
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1)})
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	for range DeviceNonces - 1 {
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = now.Add(-time.Hour)
+	for i := range 2 * DeviceNonces {
+		if i%DeviceNonces == 0 {
+			clock, mono = clock.Add(knockWindow), mono+knockWindow // a minute later, a quota again
+		}
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatalf("knock %d after the step back: %v", i, err)
+		}
+	}
+	// Back near the first packet's time: within the skew, and a replay.
+	clock, mono = now.Add(-20*time.Second), mono+time.Hour
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("the first packet again: err = %v", err)
+	}
+}
+
+// The wall clock steps forward and back again: a nonce is kept until both
+// clocks have passed it, so its packet is a replay throughout (second
+// review of the protocol review's change).
+func TestReplayCacheClockForwardBack(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock, mono := now, time.Duration(0)
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	// Two minutes ahead, a second later: another device's knock forgets
+	// what has passed.
+	clock, mono = now.Add(2*time.Minute), time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	clock, mono = now.Add(5*time.Second), 2*time.Second
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("back again, within the minute: err = %v", err)
+	}
+	// Past the minute, the wall clock still before the packet's time is
+	// out: kept.
+	clock, mono = now.Add(10*time.Second), knockWindow+time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Precheck(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("past the minute, before its time: err = %v", err)
+	}
+	// Both passed: forgotten, and its packet is stale.
+	clock, mono = now.Add(knockWindow), 2*knockWindow
+	if err := v.Precheck(first); err != nil {
+		t.Fatalf("both passed: precheck %v", err)
+	}
+	if _, err := v.Verify(first); !errors.Is(err, ErrStale) {
+		t.Fatalf("both passed: err = %v", err)
+	}
+}
+
+// The wall clock steps back after a nonce is forgotten (third review of
+// the protocol review's change): its packet is within the skew again, and
+// refused as a replay all the same, as is any as old.
+func TestReplayAfterForgottenStepBack(t *testing.T) {
+	truth := time.Unix(1767225600, 0)
+	clock, mono := truth.Add(2*time.Minute), time.Duration(0) // the node's clock fast
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	first := seal(t, 0x11, Request{Time: clock}) // a client as fast
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	// Both clocks past it: another knock forgets it.
+	clock, mono = clock.Add(62*time.Second), 62*time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Precheck(first); err != nil {
+		t.Fatalf("not forgotten: %v", err)
+	}
+	// NTP steps the clock back to the truth; the packet's time is within
+	// the skew again.
+	clock, mono = truth.Add(2*time.Minute+10*time.Second), 70*time.Second
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) || !errors.Is(err, ErrClockBack) {
+		t.Fatalf("its packet after the step back: err = %v", err)
+	}
+	// A new packet of a time after every one forgotten passes.
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock.Add(20 * time.Second)})); err != nil {
+		t.Fatalf("a new packet: %v", err)
+	}
+}
+
+// VerifyDevices tries only the devices named: another's packet is no
+// one's, a name not enrolled is skipped, and a packet of one named passes.
+func TestVerifyDevices(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	v := newTestVerifier(now, device("a", 0x11, 1), device("b", 0x22, 1))
+	pa := seal(t, 0x11, Request{Time: now})
+	if _, err := v.VerifyDevices(pa, []string{"b"}); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, b tried: %v", err)
+	}
+	if _, err := v.VerifyDevices(pa, []string{"gone"}); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, no one enrolled tried: %v", err)
+	}
+	if _, err := v.VerifyDevices(pa, nil); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, no one tried: %v", err)
+	}
+	g, err := v.VerifyDevices(pa, []string{"gone", "a"})
+	if err != nil || g.DeviceID != "a" {
+		t.Fatalf("a's packet, a tried: %+v %v", g, err)
+	}
+	if _, err := v.VerifyDevices(pa, []string{"a"}); !errors.Is(err, ErrReplay) {
+		t.Fatalf("again: %v", err)
+	}
+}
+
+// TestTTLFloorAndSetTTL: a grant lasts a second at least, whatever the
+// node's TTLs (nft takes 0 for no timeout at all: fourth review), and new
+// TTLs keep the replay cache.
+func TestTTLFloorAndSetTTL(t *testing.T) {
+	clock := time.Unix(1767225600, 0)
+	v := NewVerifier(testParams(), 0, 0, 1000)
+	v.SetClock(func() time.Time { return clock })
+	v.SetDevices([]Device{{ID: "a", Key: fill32(0x11), Allowed: []uint16{1}}})
+	pkt := seal(t, 0x11, Request{Time: clock})
+	g, err := v.Verify(pkt)
+	if err != nil || g.TTL != time.Second {
+		t.Fatalf("TTLs of 0: %v %v", g.TTL, err)
+	}
+	v.SetTTL(10*time.Minute, time.Hour)
+	if _, err := v.Verify(pkt); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replayed after new TTLs: %v", err)
+	}
+	if g, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil || g.TTL != 10*time.Minute {
+		t.Fatalf("the new default: %v %v", g.TTL, err)
 	}
 }

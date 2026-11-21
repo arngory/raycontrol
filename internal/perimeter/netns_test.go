@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -751,7 +752,7 @@ func TestNetns(t *testing.T) {
 		}
 	})
 	t.Run("grants without destroy element", func(t *testing.T) {
-		// nft before 1.0.8 and kernels before 6.3: what is absent cannot
+		// nft before 1.0.7 and kernels before 6.3: what is absent cannot
 		// fail a delete, and what fails is said.
 		was := fw.destroy
 		fw.destroy = false
@@ -764,24 +765,59 @@ func TestNetns(t *testing.T) {
 			}
 			return string(out)
 		}
-		if err := fw.Deny(a, p); err != nil {
+		if err := fw.SetGrants(nil, elemsOf(a, p)); err != nil {
 			t.Fatalf("closing what is not there: %v", err)
 		}
-		if err := fw.Allow(a, p, time.Hour); err != nil {
+		if err := fw.SetGrants(grantsOf(a, p, time.Hour), nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := fw.Allow(a, p, time.Minute); err != nil {
+		if err := fw.SetGrants(grantsOf(a, p, time.Minute), nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := list(); !strings.Contains(got, "192.0.2.77 . tcp . 18999 timeout 1m") || strings.Contains(got, "timeout 1h") {
 			t.Fatalf("a shorter grant again: %s", got)
 		}
-		if err := fw.Deny(a, p); err != nil || strings.Contains(list(), "192.0.2.77") {
+		if err := fw.SetGrants(nil, elemsOf(a, p)); err != nil || strings.Contains(list(), "192.0.2.77") {
 			t.Fatalf("closed: %v\n%s", err, list())
 		}
 		bad := netip.MustParseAddr("192.0.2.78")
-		if err := fw.Deny(bad, []Port{{"nosuchproto", 1}}); err == nil {
+		if err := fw.SetGrants(nil, elemsOf(bad, []Port{{"nosuchproto", 1}})); err == nil {
 			t.Fatal("a real error said nothing")
+		}
+	})
+	t.Run("one transaction for grants of several ends", func(t *testing.T) {
+		// Each element its own timeout, an element closed in the same
+		// transaction, with "destroy element" and without.
+		list := func() string {
+			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			return string(out)
+		}
+		was := fw.destroy
+		defer func() { fw.destroy = was }()
+		for _, destroy := range []bool{was, false} {
+			fw.destroy = destroy
+			a, b := netip.MustParseAddr("192.0.2.81"), netip.MustParseAddr("192.0.2.82")
+			if err := fw.SetGrants(grantsOf(b, []Port{{"tcp", 18998}}, time.Hour), nil); err != nil {
+				t.Fatal(err)
+			}
+			allow := []Grant{{a, Port{"tcp", 18998}, time.Hour}, {a, Port{"udp", 18998}, 2 * time.Minute}}
+			if err := fw.SetGrants(allow, elemsOf(b, []Port{{"tcp", 18998}})); err != nil {
+				t.Fatalf("destroy %v: %v", destroy, err)
+			}
+			got := list()
+			if !strings.Contains(got, "192.0.2.81 . tcp . 18998 timeout 1h") || !strings.Contains(got, "192.0.2.81 . udp . 18998 timeout 2m") ||
+				strings.Contains(got, "192.0.2.82") {
+				t.Fatalf("destroy %v: %s", destroy, got)
+			}
+			if err := fw.SetGrants([]Grant{{a, Port{"tcp", 18998}, 0}}, nil); err == nil {
+				t.Fatal("a grant of 0 went to nft")
+			}
+			if err := fw.SetGrants(nil, elemsOf(a, []Port{{"tcp", 18998}, {"udp", 18998}})); err != nil || strings.Contains(list(), "192.0.2.81") {
+				t.Fatalf("closed: %v\n%s", err, list())
+			}
 		}
 	})
 	t.Run("table restored after flush ruleset", func(t *testing.T) {
@@ -1413,13 +1449,50 @@ func connAs(uid int, ap netip.AddrPort) (net.Conn, error) {
 	}
 	tv := unix.Timeval{Sec: 2}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
-	if err := unix.Connect(fd, sa); err != nil {
+	err = unix.Connect(fd, sa)
+	if errors.Is(err, syscall.EINTR) {
+		// A signal cut the wait (Go's preemption: a connect with
+		// SO_SNDTIMEO is never restarted, signal(7)); the connection goes
+		// on, and its outcome comes as SO_ERROR.
+		err = connectOutcome(fd, 2*time.Second)
+	}
+	if err != nil {
 		unix.Close(fd)
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), "tcp")
 	defer f.Close()
 	return net.FileConn(f)
+}
+
+// connectOutcome waits until a connect in progress on fd ends, and returns
+// its error (SO_ERROR), nil when it connected.
+func connectOutcome(fd int, wait time.Duration) error {
+	end := time.Now().Add(wait)
+	for {
+		left := time.Until(end)
+		if left <= 0 {
+			return syscall.ETIMEDOUT
+		}
+		n, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}, int(left.Milliseconds())+1) //nolint:gosec // G115: a socket's fd
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return syscall.ETIMEDOUT
+		}
+		v, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+		if err != nil {
+			return err
+		}
+		if v != 0 {
+			return syscall.Errno(v) //nolint:gosec // G115: an errno
+		}
+		return nil
+	}
 }
 
 // sendAs sends one UDP datagram from a socket owned by uid.
