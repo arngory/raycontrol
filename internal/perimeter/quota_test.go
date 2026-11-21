@@ -65,33 +65,53 @@ func TestDeviceAddrs(t *testing.T) {
 }
 
 // TestCheckBudget: past the budget of checks, packets from sources without
-// a grant are not checked (ErrFlood); a source that holds one is, and so
-// renews its grant through a flood.
+// a grant are not checked (ErrFlood); a source that holds one is, on a
+// budget of its own, and so renews its grant through a flood; so is the
+// TCP carrier. What costs no decryption (length, a nonce seen) spends no
+// budget; a revoked device's sources hold no grant.
 func TestCheckBudget(t *testing.T) {
 	now := time.Unix(1767225600, 0)
 	fw := &fakeFW{}
 	g := NewGate(fw, quiet)
 	g.now = func() time.Time { return now }
-	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}})
+	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}},
+		&perimeterv1.Device{Id: "bob", Key: key(0x22), Allowed: []uint32{1}})
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
 	}
-	if want := float64(verifyRateMax); g.budgetRate != want {
-		t.Fatalf("one device: budget %v, want %v", g.budgetRate, want)
+	if want := verifyRate(2); g.budgetRate != want {
+		t.Fatalf("two devices: budget %v, want %v", g.budgetRate, want)
 	}
 	client := netip.MustParseAddr("2001:db8:7:7::1")
 	if _, err := g.Handle(client, netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
 	}
+	bobAt := netip.MustParseAddr("198.51.100.200")
+	if _, err := g.Handle(bobAt, netip.Addr{}, seal(t, snap, 0x22, now)); err != nil {
+		t.Fatal(err)
+	}
+	// Free: a wrong length, a nonce seen.
+	seen := seal(t, snap, 0x11, now)
+	if _, err := g.Handle(netip.MustParseAddr("2001:db8:9::1"), netip.Addr{}, seen); err != nil {
+		t.Fatal(err)
+	}
+	before := g.budget.tokens
+	for range 100 {
+		g.Handle(netip.MustParseAddr("203.0.113.1"), netip.Addr{}, []byte("short"))
+		g.Handle(netip.MustParseAddr("203.0.113.1"), netip.Addr{}, seen)
+	}
+	if g.budget.tokens != before {
+		t.Fatalf("free packets spent %v of the budget", before-g.budget.tokens)
+	}
 	junk := make([]byte, 120)
 	flooded := 0
 	for i := range int(g.budgetRate) + 100 {
-		src := netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)})
+		src := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
 		if _, err := g.Handle(src, netip.Addr{}, junk); errors.Is(err, ErrFlood) {
 			flooded++
 		}
 	}
-	if flooded < 99 || flooded > 101 {
+	if flooded < 99 || flooded > 103 {
 		t.Fatalf("%d of the packets past the budget not checked, want 100", flooded)
 	}
 	// Another address of the client's /64 knocks again: checked, granted.
@@ -101,9 +121,24 @@ func TestCheckBudget(t *testing.T) {
 	if _, err := g.Handle(netip.MustParseAddr("2001:db8:7:8::1"), netip.Addr{}, seal(t, snap, 0x11, now)); !errors.Is(err, ErrFlood) {
 		t.Fatalf("a new source through the flood: %v", err)
 	}
+	if _, err := g.HandleStream(netip.MustParseAddr("2001:db8:7:8::1"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
+		t.Fatalf("a new source over the TCP carrier, through the flood: %v", err)
+	}
+	// bob is revoked: his source holds no grant any more, and is checked
+	// on the budget of the others without one.
+	snap.Devices = snap.Devices[:1]
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.known[knockSource(bobAt)]; n != 0 {
+		t.Fatalf("a revoked device's source known %d times", n)
+	}
+	if _, err := g.Handle(bobAt, netip.Addr{}, junk); !errors.Is(err, ErrFlood) {
+		t.Fatalf("a revoked device's source through the flood: %v", err)
+	}
 	// A second later the budget has refilled.
 	now = now.Add(time.Second)
-	if _, err := g.Handle(netip.MustParseAddr("2001:db8:7:8::1"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
+	if _, err := g.Handle(netip.MustParseAddr("2001:db8:7:9::1"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatalf("a new source a second later: %v", err)
 	}
 	// The budget falls with the devices: each costs every packet a check.
@@ -112,5 +147,8 @@ func TestCheckBudget(t *testing.T) {
 	}
 	if r := verifyRate(100000); r != verifyRateMin {
 		t.Fatalf("100000 devices: %v", r)
+	}
+	if r := verifyRate(1); r != verifyRateMax {
+		t.Fatalf("one device: %v", r)
 	}
 }

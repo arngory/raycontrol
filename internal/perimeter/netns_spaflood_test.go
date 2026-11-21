@@ -14,10 +14,10 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 )
 
-// TestNetnsSPARate: SPA packets are limited per IPv4 address, per IPv6 /64
-// whatever the addresses inside it, and per /48 over its /64s (S-8,
-// protocol review 2026-11). Root under unshare -n, as TestNetns; the IPv6
-// parts where the kernel has IPv6.
+// TestNetnsSPARate: SPA packets are limited per IPv4 address and per IPv6
+// /64 whatever the addresses inside it (S-8, protocol review 2026-11); not
+// per /48, whose /64s each have their own. Root under unshare -n, as
+// TestNetns; the IPv6 parts where the kernel has IPv6.
 func TestNetnsSPARate(t *testing.T) {
 	if os.Getenv("RAYCONTROL_NETNS_TEST") != "1" {
 		t.Skip("set RAYCONTROL_NETNS_TEST=1 and run as root under unshare -n")
@@ -42,7 +42,7 @@ func TestNetnsSPARate(t *testing.T) {
 		}
 	}
 
-	const rate = 2 // an address or a /64: 2/s, burst 4; a /48: 8/s, burst 16
+	const rate = 2 // an address or a /64: 2/s, burst 4
 	fw := &NFT{NflogGroup: 8, FilterLoopback: true, RateLimit: rate}
 	if err := fw.Setup(); err != nil {
 		t.Fatal(err)
@@ -106,8 +106,8 @@ func TestNetnsSPARate(t *testing.T) {
 	if d := dropped(func() { send(one64, 4) }); d < 80-4-2*rate || d > 80-4 {
 		t.Fatalf("one /64 sent 80 from 20 addresses: %d dropped, want 76 (its burst 4 through)", d)
 	}
-	// 20 /64s of one /48, 4 each within their own: the /48's burst, 16.
-	if d := dropped(func() { send(one48, 4) }); d < 80-16-8*rate || d > 80-16 {
-		t.Fatalf("one /48 sent 80 from 20 /64s: %d dropped, want 64 (its burst 16 through)", d)
+	// 20 /64s of one /48, 4 each within their own: none dropped.
+	if d := dropped(func() { send(one48, 4) }); d != 0 {
+		t.Fatalf("one /48 sent 80 from 20 /64s within their bursts: %d dropped", d)
 	}
 }

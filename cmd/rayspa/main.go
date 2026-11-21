@@ -86,7 +86,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	socket := fs.String("socket", "/run/raycontrol/rayd.sock", "rayd API socket")
 	group := fs.Uint("nflog-group", 7, "NFLOG group for SPA packets")
-	rate := fs.Int("rate", 20, "SPA packets (and TCP SYNs) per second per IPv4 address or IPv6 /64; a /48 four times as many")
+	rate := fs.Int("rate", 20, "SPA packets (and TCP SYNs) per second per IPv4 address or IPv6 /64")
 	debug := fs.Bool("debug", false, "log rejected packets")
 	state := fs.String("state", "", "keep the last snapshot in this file and start from it (Q-3); empty: none")
 	relayBundle := fs.String("relay", "", "run as a relay (relay-v1 §3.1): take the perimeter from the exit named in this bundle "+
@@ -147,28 +147,13 @@ func run(args []string) error {
 			Report: guardReporter(ctx, *socket, log), Log: log})
 	}
 	warn := everyMinute()
-	handle := func(src, dst netip.Addr, pkt []byte) {
-		g, err := gate.Handle(src, dst, pkt)
-		if err != nil {
-			log.Debug("spa rejected", "src", src, "err", err)
-			switch {
-			case errors.Is(err, spa.ErrQuota):
-				// The device's ID, not where it knocked from.
-				if warn("quota " + g.DeviceID) {
-					log.Warn("spa: a device's knocks refused over its quota (a leaked invite? rayctl device revoke)", "device", g.DeviceID)
-				}
-			case errors.Is(err, perimeter.ErrFlood):
-				if warn("flood") {
-					log.Warn("spa: more packets than the node checks, from sources without a grant: a flood? Those with grants still pass")
-				}
-			}
-			return
+	handler := func(check func(src, dst netip.Addr, pkt []byte) (spa.Grant, error)) perimeter.Handler {
+		return func(src, dst netip.Addr, pkt []byte) {
+			handleKnock(log, warn, check, src, dst, pkt)
 		}
-		// Who connected from where is user activity: not in the journal at
-		// the default level (docs/design/observability.md, R4-3).
-		log.Debug("spa granted", "src", src, "device", g.DeviceID, "scope", g.Scope, "ttl", g.TTL)
 	}
-	carrier := &perimeter.TCPCarrier{Handler: handle, LenMax: gate.LenMax, Log: log}
+	handle := handler(gate.Handle)
+	carrier := &perimeter.TCPCarrier{Handler: handler(gate.HandleStream), LenMax: gate.LenMax, Log: log}
 	defer carrier.Close()
 
 	// The last snapshot from rayd, until rayd answers: the admin addresses
@@ -648,6 +633,32 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 		}
 		backoff = min(2*backoff, 30*time.Second)
 	}
+}
+
+// handleKnock checks one SPA packet with check (the gate's Handle, or
+// HandleStream for the TCP carrier) and says what came of it: at debug,
+// and at warn once a minute for a device over its quota or a flood.
+func handleKnock(log *slog.Logger, warn func(string) bool, check func(src, dst netip.Addr, pkt []byte) (spa.Grant, error),
+	src, dst netip.Addr, pkt []byte) {
+	g, err := check(src, dst, pkt)
+	if err != nil {
+		log.Debug("spa rejected", "src", src, "err", err)
+		switch {
+		case errors.Is(err, spa.ErrQuota):
+			// The device's ID, not where it knocked from.
+			if warn("quota " + g.DeviceID) {
+				log.Warn("spa: a device's knocks refused over its quota (a leaked invite? rayctl device revoke)", "device", g.DeviceID)
+			}
+		case errors.Is(err, perimeter.ErrFlood):
+			if warn("flood") {
+				log.Warn("spa: more packets than the node checks: a flood? Sources with grants and the TCP carrier keep their own share")
+			}
+		}
+		return
+	}
+	// Who connected from where is user activity: not in the journal at
+	// the default level (docs/design/observability.md, R4-3).
+	log.Debug("spa granted", "src", src, "device", g.DeviceID, "scope", g.Scope, "ttl", g.TTL)
 }
 
 // everyMinute says whether something has not been said in the last

@@ -241,7 +241,9 @@ func TestRejects(t *testing.T) {
 		if _, err := v.Verify(good); err != nil {
 			t.Fatal(err)
 		}
+		// Both clocks a minute on: the nonce is forgotten, its packet stale.
 		v.now = func() time.Time { return now.Add(2*MaxSkew + time.Second) }
+		v.since = func() time.Duration { return knockWindow + time.Second }
 		if _, err := v.Verify(good); !errors.Is(err, ErrStale) {
 			t.Fatalf("err = %v", err)
 		}
@@ -399,7 +401,7 @@ func TestDeviceQuota(t *testing.T) {
 	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
 		t.Fatalf("another device: %v", err)
 	}
-	clock, mono = now.Add(2*MaxSkew), 2*MaxSkew
+	clock, mono = now.Add(knockWindow), knockWindow
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 		t.Fatalf("after its knocks aged: %v", err)
 	}
@@ -414,14 +416,16 @@ func TestDeviceQuota(t *testing.T) {
 func TestReplayCacheOrder(t *testing.T) {
 	now := time.Unix(1767225600, 0)
 	clock := now
+	mono := time.Duration(0)
 	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 3)
 	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
 	v.SetDevices([]Device{device("a", 0x11, 1)})
 	first := seal(t, 0x11, Request{Time: clock})
 	if _, err := v.Verify(first); err != nil {
 		t.Fatal(err)
 	}
-	clock = now.Add(MaxSkew)
+	clock, mono = now.Add(MaxSkew), MaxSkew
 	for range 2 {
 		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 			t.Fatal(err)
@@ -433,8 +437,9 @@ func TestReplayCacheOrder(t *testing.T) {
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrBusy) {
 		t.Fatalf("cache full: err = %v", err)
 	}
-	// The first one's time passes: one place frees, the others stay.
-	clock = now.Add(2 * MaxSkew)
+	// The first one's time passes on both clocks: one place frees, the
+	// others stay.
+	clock, mono = now.Add(knockWindow), knockWindow
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 		t.Fatalf("after the first expired: %v", err)
 	}
@@ -465,7 +470,7 @@ func TestReplayCacheClockBack(t *testing.T) {
 	clock = now.Add(-time.Hour)
 	for i := range 2 * DeviceNonces {
 		if i%DeviceNonces == 0 {
-			clock, mono = clock.Add(2*MaxSkew), mono+2*MaxSkew // a minute later, a quota again
+			clock, mono = clock.Add(knockWindow), mono+knockWindow // a minute later, a quota again
 		}
 		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 			t.Fatalf("knock %d after the step back: %v", i, err)
@@ -475,5 +480,48 @@ func TestReplayCacheClockBack(t *testing.T) {
 	clock, mono = now.Add(-20*time.Second), mono+time.Hour
 	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
 		t.Fatalf("the first packet again: err = %v", err)
+	}
+}
+
+// The wall clock steps forward and back again: a nonce is kept until both
+// clocks have passed it, so its packet is a replay throughout (second
+// review of the protocol review's change).
+func TestReplayCacheClockForwardBack(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock, mono := now, time.Duration(0)
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	// Two minutes ahead, a second later: another device's knock forgets
+	// what has passed.
+	clock, mono = now.Add(2*time.Minute), time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	clock, mono = now.Add(5*time.Second), 2*time.Second
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("back again, within the minute: err = %v", err)
+	}
+	// Past the minute, the wall clock still before the packet's time is
+	// out: kept.
+	clock, mono = now.Add(10*time.Second), knockWindow+time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Precheck(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("past the minute, before its time: err = %v", err)
+	}
+	// Both passed: forgotten, and its packet is stale.
+	clock, mono = now.Add(knockWindow), 2*knockWindow
+	if err := v.Precheck(first); err != nil {
+		t.Fatalf("both passed: precheck %v", err)
+	}
+	if _, err := v.Verify(first); !errors.Is(err, ErrStale) {
+		t.Fatalf("both passed: err = %v", err)
 	}
 }

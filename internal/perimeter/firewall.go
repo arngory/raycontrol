@@ -132,12 +132,11 @@ func (n *NFT) Ruleset() string {
 	}
 	limit := fmt.Sprintf("limit rate over %d/second burst %d packets", rate, 2*rate)
 	// SPA packets: per IPv4 address and IPv6 /64 (an attacker has a whole
-	// /64), more per /48 (S-8). What passes when a set is full, an update
-	// with no room not matching, the gate bounds: its budget of checks
-	// (Gate.Handle), past which a source without a grant is not checked.
-	// No ceiling here: one for all would refuse the clients too, and SYNs
-	// from spoofed sources would fill it at no cost.
-	limit48 := fmt.Sprintf("limit rate over %d/second burst %d packets", 4*rate, 8*rate)
+	// /64, S-8). What passes when a set is full, an update with no room
+	// not matching, the gate bounds with its budgets of checks
+	// (Gate.Handle). No limit for all here, nor per /48: spoofed packets
+	// would fill one at no cost, and refuse the clients of the network, or
+	// of every network, with them.
 	lo := `iif "lo" accept`
 	// Local traffic skips prerouting; tests in a namespace need the same
 	// redirect on output.
@@ -230,7 +229,6 @@ table inet %[1]s {
 	set acme_in { type inet_service; flags timeout; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
-	set rate48 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
 	# The node's own and local networks (R4-38, LocalNets).
 	set local4 { type ipv4_addr; flags interval; elements = { %[13]s }; }
@@ -300,12 +298,10 @@ table inet %[1]s {
 
 		udp dport @spa_udp update @rate4 { ip saddr %[2]s } counter drop comment "spa-rate"
 		udp dport @spa_udp update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-rate"
-		udp dport @spa_udp update @rate48 { ip6 saddr & ffff:ffff:ffff:: %[16]s } counter drop comment "spa-rate"
 		udp dport @spa_udp log group %[3]d drop
 
 		tcp dport @spa_tcp tcp flags syn update @rate4 { ip saddr %[2]s } counter drop comment "spa-syn-rate"
 		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-syn-rate"
-		tcp dport @spa_tcp tcp flags syn update @rate48 { ip6 saddr & ffff:ffff:ffff:: %[16]s } counter drop comment "spa-syn-rate"
 		jump admit
 	}
 
@@ -408,7 +404,7 @@ table inet %[1]s {
 	}%[8]s
 }
 `, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6,
-		resolverElems(false, true), limit48)
+		resolverElems(false, true))
 }
 
 // Setup installs the table and detects whether "destroy element" works.

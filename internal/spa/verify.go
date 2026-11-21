@@ -59,23 +59,33 @@ type Verifier struct {
 	devices []Device
 	keys    map[uint64][][KeySize]byte // epoch -> key per device, same order as devices
 	// seen holds each nonce until a packet with it can no longer pass the
-	// skew check: its own time plus MaxSkew, on the wall clock, which the
-	// skew check reads. A wall clock that steps back keeps them so much
-	// longer, as it must: their packets pass the check again until then.
-	seen   map[[NonceSize]byte]time.Time
-	expiry nonceHeap
-	// The knocks of the last 2*MaxSkew, in the order they came by a
-	// monotonic clock (since), and how many each device has: its quota.
-	// Monotonic, so that a wall clock stepping back holds no quota.
+	// skew check: until a minute has passed on a monotonic clock (since)
+	// and the wall clock, which the skew check reads, is past the packet's
+	// time plus MaxSkew. Either alone is not enough: the wall clock alone
+	// loses the nonce when it steps forward and back again, the monotonic
+	// one when the wall clock steps back.
+	seen map[[NonceSize]byte]time.Time
+	// knocks are the nonces of the last minute in the order they came,
+	// with their devices: the quotas (perDevice), and the first half of
+	// seen's expiry. Past the minute a nonce whose wall time has not come
+	// waits in expiry.
 	knocks    []knock
 	head      int
+	expiry    nonceHeap
 	perDevice map[string]int
 	since     func() time.Duration
 }
 
+// knockWindow is how long, on the monotonic clock, a knock counts against
+// its device's quota and holds its nonce: the skew both ways and a second
+// for the skew check's rounding.
+const knockWindow = 2*MaxSkew + time.Second
+
 type knock struct {
 	at     time.Duration
 	device string
+	nonce  [NonceSize]byte
+	until  time.Time
 }
 
 type nonceExpiry struct {
@@ -140,7 +150,8 @@ func (v *Verifier) Verify(pkt []byte) (Grant, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	now := v.now()
-	if until, ok := v.seen[nonce]; ok && !now.Round(0).After(until) {
+	v.forget(now)
+	if _, ok := v.seen[nonce]; ok {
 		return Grant{}, ErrReplay
 	}
 
@@ -232,6 +243,22 @@ func monotonic() func() time.Duration {
 	return func() time.Duration { return time.Since(start) }
 }
 
+// Precheck is what Verify checks before any decryption, the length and a
+// nonce already seen: a caller that pays for checks (the gate's budget)
+// pays nothing for these.
+func (v *Verifier) Precheck(pkt []byte) error {
+	if len(pkt) < v.params.LenMin || len(pkt) > v.params.LenMax {
+		return ErrLength
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.forget(v.now())
+	if _, ok := v.seen[[NonceSize]byte(pkt[:NonceSize])]; ok {
+		return ErrReplay
+	}
+	return nil
+}
+
 // remember stores the nonce of a packet of the given time for as long as
 // it could pass the skew check, under the device's quota.
 func (v *Verifier) remember(nonce [NonceSize]byte, device string, sent, now time.Time) error {
@@ -245,35 +272,42 @@ func (v *Verifier) remember(nonce [NonceSize]byte, device string, sent, now time
 	// A second over, for the rounding of the skew check.
 	until := sent.Round(0).Add(MaxSkew + time.Second)
 	v.seen[nonce] = until
-	heap.Push(&v.expiry, nonceExpiry{until: until, nonce: nonce})
-	v.knocks = append(v.knocks, knock{at: v.since(), device: device})
+	v.knocks = append(v.knocks, knock{at: v.since(), device: device, nonce: nonce, until: until})
 	v.perDevice[device]++
 	return nil
 }
 
-// forget drops the nonces past their time and the knocks out of the quotas'
-// window, each in its order: no walk over the cache.
+// forget drops what has passed, each in its order, with no walk over the
+// cache: the knocks out of the window, whose quotas free; of their nonces
+// those whose wall time has come too, the others into expiry; and from
+// expiry those whose wall time has come.
 func (v *Verifier) forget(now time.Time) {
-	wall := now.Round(0)
-	for len(v.expiry) > 0 && v.expiry[0].until.Before(wall) {
-		e := heap.Pop(&v.expiry).(nonceExpiry)
-		if v.seen[e.nonce].Equal(e.until) {
-			delete(v.seen, e.nonce)
-		}
-	}
-	at := v.since()
-	for v.head < len(v.knocks) && at-v.knocks[v.head].at >= 2*MaxSkew {
-		d := v.knocks[v.head].device
+	wall, at := now.Round(0), v.since()
+	for v.head < len(v.knocks) && at-v.knocks[v.head].at >= knockWindow {
+		k := v.knocks[v.head]
 		v.knocks[v.head] = knock{}
 		v.head++
-		if v.perDevice[d]--; v.perDevice[d] <= 0 {
-			delete(v.perDevice, d)
+		if v.perDevice[k.device]--; v.perDevice[k.device] <= 0 {
+			delete(v.perDevice, k.device)
+		}
+		switch {
+		case !v.seen[k.nonce].Equal(k.until):
+		case k.until.Before(wall):
+			delete(v.seen, k.nonce)
+		default:
+			heap.Push(&v.expiry, nonceExpiry{until: k.until, nonce: k.nonce})
 		}
 	}
 	if v.head > 0 && v.head*2 >= len(v.knocks) {
 		n := copy(v.knocks, v.knocks[v.head:])
 		clear(v.knocks[n:])
 		v.knocks, v.head = v.knocks[:n], 0
+	}
+	for len(v.expiry) > 0 && v.expiry[0].until.Before(wall) {
+		e := heap.Pop(&v.expiry).(nonceExpiry)
+		if v.seen[e.nonce].Equal(e.until) {
+			delete(v.seen, e.nonce)
+		}
 	}
 }
 
