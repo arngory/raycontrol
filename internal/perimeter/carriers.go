@@ -63,6 +63,8 @@ func ReadNFLOG(ctx context.Context, group uint16, h Handler, log *slog.Logger) e
 		return err
 	}
 	defer nf.Close()
+	var lastWarn time.Time
+	unsaid := 0
 	err = nf.RegisterWithErrorFunc(ctx, func(a nflog.Attribute) int {
 		if a.Payload == nil {
 			return 0
@@ -72,8 +74,14 @@ func ReadNFLOG(ctx context.Context, group uint16, h Handler, log *slog.Logger) e
 		}
 		return 0
 	}, func(err error) int {
+		// A flood overflows the socket: once a minute, with how many.
 		if ctx.Err() == nil {
-			log.Warn("nflog read", "err", err)
+			if now := time.Now(); now.Sub(lastWarn) >= time.Minute {
+				log.Warn("nflog read", "err", err, "more", unsaid)
+				lastWarn, unsaid = now, 0
+			} else {
+				unsaid++
+			}
 		}
 		return 0
 	})

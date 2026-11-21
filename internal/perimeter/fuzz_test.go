@@ -101,14 +101,18 @@ func (f *scriptFW) SetInLimit(on bool) error {
 	return f.run(inLimitScript(on, f.n.RelayTo.IsValid(), 1))
 }
 func (f *scriptFW) SetGuard(on bool) error { return f.run(GuardScript(on)) }
-func (f *scriptFW) Allow(addr netip.Addr, ports []Port, ttl time.Duration) error {
-	f.ports, f.addrs = append(f.ports, ports...), append(f.addrs, addr)
-	set, elems := elements(addr, ports, ttl)
-	return f.run(f.n.forget(addr, ports) + "add element inet " + Table + " " + set + " { " + elems + " }\n")
-}
-func (f *scriptFW) Deny(addr netip.Addr, ports []Port) error {
-	f.ports, f.addrs = append(f.ports, ports...), append(f.addrs, addr)
-	return f.run(f.n.forget(addr, ports))
+func (f *scriptFW) SetGrants(allow []Grant, deny []Elem) error {
+	for _, gr := range allow {
+		f.ports, f.addrs = append(f.ports, gr.Port), append(f.addrs, gr.Addr)
+	}
+	for _, e := range deny {
+		f.ports, f.addrs = append(f.ports, e.Port), append(f.addrs, e.Addr)
+	}
+	script, err := f.n.grantsScript(allow, deny)
+	if err != nil || script == "" {
+		return err
+	}
+	return f.run(script)
 }
 func (f *scriptFW) Teardown() error { return nil }
 

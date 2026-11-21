@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/redact"
 )
 
 // Port is a transport port on the node.
@@ -68,8 +70,11 @@ type Firewall interface {
 	// SetGuard turns the conntrack guard's refusal on or off (§6.3); Setup
 	// makes it off.
 	SetGuard(on bool) error
-	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
-	Deny(addr netip.Addr, ports []Port) error
+	// SetGrants changes SPA grants in one transaction: each of deny
+	// closes, each of allow opens its port to its address for its TTL, in
+	// place of what was there. A TTL under a second is refused: nft would
+	// take 0 for no timeout at all.
+	SetGrants(allow []Grant, deny []Elem) error
 	Teardown() error
 }
 
@@ -114,9 +119,16 @@ func (n *NFT) run(script string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("nft: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("nft: %w: %s", err, noAddrs(strings.TrimSpace(stderr.String())))
 	}
 	return nil
+}
+
+// noAddrs takes the addresses out of nft's words: it echoes the command it
+// refused, a client's address in its elements, and the error goes to the
+// journal (R4-3: logs hold no user's address).
+func noAddrs(s string) string {
+	return redact.New().String(s)
 }
 
 // DataPlaneUIDs are the UIDs of the front and the data-plane services
@@ -131,6 +143,14 @@ func (n *NFT) Ruleset() string {
 		rate = 20
 	}
 	limit := fmt.Sprintf("limit rate over %d/second burst %d packets", rate, 2*rate)
+	// SPA packets: per IPv4 address and IPv6 /64 (an attacker has a whole
+	// /64, S-8), and the carrier's SYNs in sets of their own: a UDP flood
+	// that fills rate4 or rate6 leaves the SYNs' limit as it was. What
+	// passes when a set is full (some 1100 new sources a second keep one
+	// full: its elements last a minute; a /48 holds 65536 /64s), an update with no room not matching, the
+	// gate bounds with its budgets of checks (Gate.Handle). No limit for
+	// all here, nor per /48: spoofed packets would fill one at no cost, and
+	// refuse the clients of the network, or of every network, with them.
 	lo := `iif "lo" accept`
 	// Local traffic skips prerouting; tests in a namespace need the same
 	// redirect on output.
@@ -223,6 +243,8 @@ table inet %[1]s {
 	set acme_in { type inet_service; flags timeout; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set syn4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set syn6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
 	# The node's own and local networks (R4-38, LocalNets).
 	set local4 { type ipv4_addr; flags interval; elements = { %[13]s }; }
@@ -290,12 +312,12 @@ table inet %[1]s {
 		ct state invalid drop
 		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept
 
-		udp dport @spa_udp update @rate4 { ip saddr %[2]s } drop
-		udp dport @spa_udp update @rate6 { ip6 saddr %[2]s } drop
+		udp dport @spa_udp update @rate4 { ip saddr %[2]s } counter drop comment "spa-rate"
+		udp dport @spa_udp update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-rate"
 		udp dport @spa_udp log group %[3]d drop
 
-		tcp dport @spa_tcp tcp flags syn update @rate4 { ip saddr %[2]s } drop
-		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr %[2]s } drop
+		tcp dport @spa_tcp tcp flags syn update @syn4 { ip saddr %[2]s } counter drop comment "spa-syn-rate"
+		tcp dport @spa_tcp tcp flags syn update @syn6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-syn-rate"
 		jump admit
 	}
 
@@ -438,7 +460,7 @@ func (n *NFT) SetupScript(c TableContents) string {
 	if n.RelayTo.IsValid() && c.ACMEForwardTTL > 0 {
 		b.WriteString(acmeForwardScript(c.ACMEForwardTTL))
 	}
-	b.WriteString(grantsScript(c.Grants))
+	addGrants(&b, c.Grants)
 	if c.Relayed {
 		b.WriteString(relaysScript(c.Relays, c.RelayPorts))
 	}
@@ -888,45 +910,10 @@ func portElems(ports []Port) []string {
 	return out
 }
 
-func elements(addr netip.Addr, ports []Port, ttl time.Duration) (set, elems string) {
-	set = "allow4"
-	if addr.Is6() && !addr.Is4In6() {
-		set = "allow6"
-	}
-	addr = addr.Unmap()
-	parts := make([]string, len(ports))
-	for i, p := range ports {
-		parts[i] = fmt.Sprintf("%s . %s . %d", addr, p.Proto, p.Num)
-		if ttl > 0 {
-			// Whole seconds, rounded up: "timeout 0s" would never expire.
-			parts[i] += fmt.Sprintf(" timeout %ds", int((ttl+time.Second-1)/time.Second))
-		}
-	}
-	return set, strings.Join(parts, ", ")
-}
-
-// Allow opens ports for addr until ttl passes; a repeat sets the timer anew,
-// shorter or longer.
-func (n *NFT) Allow(addr netip.Addr, ports []Port, ttl time.Duration) error {
-	if len(ports) == 0 {
-		return nil
-	}
-	set, elems := elements(addr, ports, ttl)
-	// One transaction: the old element (if any) goes, the new timer starts.
-	return n.run(n.forget(addr, ports) + fmt.Sprintf("add element inet %s %s { %s }\n", Table, set, elems))
-}
-
-// forget is the part of a transaction that removes elements, there or not.
-// Without "destroy element" (nft before 1.0.8, kernels before 6.3), adding
-// first makes the delete unable to fail for an absent element, so that the
-// transaction fails only for real.
-func (n *NFT) forget(addr netip.Addr, ports []Port) string {
-	set, keys := elements(addr, ports, 0)
-	if n.destroy {
-		return fmt.Sprintf("destroy element inet %s %s { %s }\n", Table, set, keys)
-	}
-	_, placeholders := elements(addr, ports, time.Second)
-	return fmt.Sprintf("add element inet %[1]s %[2]s { %[3]s }\ndelete element inet %[1]s %[2]s { %[4]s }\n", Table, set, placeholders, keys)
+// Elem is an address and port of the allow sets.
+type Elem struct {
+	Addr netip.Addr
+	Port Port
 }
 
 // Grant is a port open to an address for the time left.
@@ -936,30 +923,117 @@ type Grant struct {
 	TTL  time.Duration
 }
 
-// AllowAll opens the grants in one transaction, on a table just made
-// (Setup): there is nothing of theirs to replace.
-func (n *NFT) AllowAll(grants []Grant) error {
-	if s := grantsScript(grants); s != "" {
-		return n.run(s)
+func allowSet(addr netip.Addr) string {
+	if addr.Is6() && !addr.Is4In6() {
+		return "allow6"
+	}
+	return "allow4"
+}
+
+// elemsScript is one command of verb for elems, a set at a time; ttl
+// gives each its timeout (nil: none).
+func elemsScript(b *strings.Builder, verb string, elems []Elem, ttl func(int) time.Duration) {
+	bySet := map[string][]string{}
+	var sets []string
+	for i, e := range elems {
+		set := allowSet(e.Addr)
+		if bySet[set] == nil {
+			sets = append(sets, set)
+		}
+		el := fmt.Sprintf("%s . %s . %d", e.Addr.Unmap(), e.Port.Proto, e.Port.Num)
+		if ttl != nil {
+			// Whole seconds, rounded up, one at least: "timeout 0s" would
+			// never expire.
+			el += fmt.Sprintf(" timeout %ds", max(1, int((ttl(i)+time.Second-1)/time.Second)))
+		}
+		bySet[set] = append(bySet[set], el)
+	}
+	for _, set := range sets {
+		fmt.Fprintf(b, "%s element inet %s %s { %s }\n", verb, Table, set, strings.Join(bySet[set], ", "))
+	}
+}
+
+// SetGrants changes grants in one transaction: a removal waits for the
+// kernel (some 20 ms, fourth review of the protocol review's change), and
+// one transaction waits once, however many elements it removes.
+func (n *NFT) SetGrants(allow []Grant, deny []Elem) error {
+	s, err := n.grantsScript(allow, deny)
+	if err != nil || s == "" {
+		return err
+	}
+	return n.run(s)
+}
+
+func (n *NFT) grantsScript(allow []Grant, deny []Elem) (string, error) {
+	if err := checkTTLs(allow); err != nil {
+		return "", err
+	}
+	// Each element once: without "destroy element", a second delete of
+	// one would fail the transaction. One opened twice gets the longer.
+	opened := map[Elem]int{}
+	var grants []Grant
+	for _, gr := range allow {
+		e := Elem{gr.Addr.Unmap(), gr.Port}
+		if i, ok := opened[e]; ok {
+			grants[i].TTL = max(grants[i].TTL, gr.TTL)
+			continue
+		}
+		opened[e] = len(grants)
+		grants = append(grants, Grant{e.Addr, e.Port, gr.TTL})
+	}
+	var gone []Elem
+	seen := map[Elem]bool{}
+	for _, e := range deny {
+		e.Addr = e.Addr.Unmap()
+		if _, ok := opened[e]; !ok && !seen[e] {
+			seen[e] = true
+			gone = append(gone, e)
+		}
+	}
+	for _, gr := range grants {
+		gone = append(gone, Elem{gr.Addr, gr.Port})
+	}
+	allow = grants
+	var b strings.Builder
+	n.forget(&b, gone)
+	addGrants(&b, allow)
+	return b.String(), nil
+}
+
+// checkTTLs refuses a TTL under a second: nft would take "timeout 0s",
+// or none, for no timeout at all, and the element would stay for ever.
+func checkTTLs(grants []Grant) error {
+	for _, gr := range grants {
+		if gr.TTL < time.Second {
+			return fmt.Errorf("perimeter: a grant of %v for %v: under a second", gr.Port, gr.TTL)
+		}
 	}
 	return nil
 }
 
-func grantsScript(grants []Grant) string {
-	var b strings.Builder
-	for _, gr := range grants {
-		set, elems := elements(gr.Addr, []Port{gr.Port}, gr.TTL)
-		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set, elems)
+// addGrants is the command that opens grants for their TTLs.
+func addGrants(b *strings.Builder, grants []Grant) {
+	elems := make([]Elem, len(grants))
+	for i, gr := range grants {
+		elems[i] = Elem{gr.Addr, gr.Port}
 	}
-	return b.String()
+	elemsScript(b, "add", elems, func(i int) time.Duration { return grants[i].TTL })
 }
 
-// Deny closes ports for addr now, in one transaction; an error is real.
-func (n *NFT) Deny(addr netip.Addr, ports []Port) error {
-	if len(ports) == 0 {
-		return nil
+// forget is the part of a transaction that removes elements, there or not.
+// Without "destroy element" (nft before 1.0.7, kernels before 6.3), adding
+// first makes the delete unable to fail for an absent element, so that the
+// transaction fails only for real.
+func (n *NFT) forget(b *strings.Builder, elems []Elem) {
+	if len(elems) == 0 {
+		return
 	}
-	return n.run(n.forget(addr, ports))
+	if n.destroy {
+		elemsScript(b, "destroy", elems, nil)
+		return
+	}
+	elemsScript(b, "add", elems, func(int) time.Duration { return time.Second })
+	elemsScript(b, "delete", elems, nil)
 }
 
 // Drops counts what one rule of the early chain dropped.
