@@ -453,7 +453,51 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		}
 		resp.Egress = egressPB(e)
 	}
+	if !integration {
+		resp.Warnings = brutalWarnings(services, render.HostLink)
+	}
 	return connect.NewResponse(resp), nil
+}
+
+// brutalWarnings are the enabled Hysteria2 services whose Brutal has no
+// ceiling of the operator's (render.BrutalCeiling, protocol review
+// 2026-11, M1): the speed of the node's link taken in its place, or none,
+// the speed unknown or too low to trust (an emulated NIC tells its own
+// whatever the channel). The server sends each client as fast as the
+// client asks. link is asked only when some service has no up_mbps of its
+// own.
+func brutalWarnings(services []store.Service, link func() (int, string)) []string {
+	var out []string
+	mbps, iface, asked := 0, "", false
+	for _, svc := range services {
+		if !svc.Enabled || (svc.Kind != "hy2-masq" && svc.Kind != "hy2-obfs") {
+			continue
+		}
+		if _, from := render.BrutalCeiling(svc.Settings, 0); from == "" && !asked {
+			mbps, iface = link()
+			asked = true
+		}
+		up, from := render.BrutalCeiling(svc.Settings, mbps)
+		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
+		switch from {
+		case "up_mbps":
+			continue
+		case "link":
+			// Taken, and said: the port's speed is no channel's, and the
+			// operator alone knows the channel (second review).
+			out = append(out, fmt.Sprintf("%s %s: Brutal up to %d Mbit/s, the speed %s tells, which may be more than the channel; %s",
+				svc.Kind, svc.Name, up, iface, set))
+			continue
+		}
+		if mbps > 0 {
+			out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling: %s tells %d Mbit/s, which an emulated NIC tells whatever the channel, so it is not taken; %s",
+				svc.Kind, svc.Name, iface, mbps, set))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling, the speed of the node's link unknown: it sends each client as fast as the client asks; %s",
+			svc.Kind, svc.Name, set))
+	}
+	return out
 }
 
 // serviceIDs resolves service names to IDs, each once: a name given twice
@@ -1198,6 +1242,9 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	}
 	if err := s.done(ctx, what, target, err); err != nil {
 		return nil, err
+	}
+	if !req.Msg.Pin && InvitePINByDefault(role) {
+		warnings = append(warnings, fmt.Sprintf("the invite of role %s has no PIN: whoever registers with it first gets the API as %s", role, role))
 	}
 	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short,
 		InviteCodeV3: v3, Warnings: warnings}), nil

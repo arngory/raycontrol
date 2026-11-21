@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1413,13 +1414,50 @@ func connAs(uid int, ap netip.AddrPort) (net.Conn, error) {
 	}
 	tv := unix.Timeval{Sec: 2}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
-	if err := unix.Connect(fd, sa); err != nil {
+	err = unix.Connect(fd, sa)
+	if errors.Is(err, syscall.EINTR) {
+		// A signal cut the wait (Go's preemption: a connect with
+		// SO_SNDTIMEO is never restarted, signal(7)); the connection goes
+		// on, and its outcome comes as SO_ERROR.
+		err = connectOutcome(fd, 2*time.Second)
+	}
+	if err != nil {
 		unix.Close(fd)
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), "tcp")
 	defer f.Close()
 	return net.FileConn(f)
+}
+
+// connectOutcome waits until a connect in progress on fd ends, and returns
+// its error (SO_ERROR), nil when it connected.
+func connectOutcome(fd int, wait time.Duration) error {
+	end := time.Now().Add(wait)
+	for {
+		left := time.Until(end)
+		if left <= 0 {
+			return syscall.ETIMEDOUT
+		}
+		n, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLOUT}}, int(left.Milliseconds())+1) //nolint:gosec // G115: a socket's fd
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return syscall.ETIMEDOUT
+		}
+		v, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+		if err != nil {
+			return err
+		}
+		if v != 0 {
+			return syscall.Errno(v) //nolint:gosec // G115: an errno
+		}
+		return nil
+	}
 }
 
 // sendAs sends one UDP datagram from a socket owned by uid.

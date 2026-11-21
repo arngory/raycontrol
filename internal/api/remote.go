@@ -99,6 +99,14 @@ const (
 	PinLabel      = "raycontrol-invite-pin-v1"
 )
 
+// InvitePINByDefault reports whether an invite of role gets a PIN unless
+// asked for none (api-v1 §3): an invite of admin or billing that leaks is
+// the node's API, or its users', to whoever registers with it first
+// (protocol review 2026-11, L4).
+func InvitePINByDefault(role string) bool {
+	return role == "admin" || role == "billing"
+}
+
 // InvitePinProof is what Register brings for an invite's PIN (api-v1 §4).
 func InvitePinProof(inviteKey [spa.KeySize]byte, pin string) []byte {
 	m := hmac.New(sha256.New, inviteKey[:])
