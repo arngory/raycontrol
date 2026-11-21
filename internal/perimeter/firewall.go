@@ -968,10 +968,32 @@ func (n *NFT) grantsScript(allow []Grant, deny []Elem) (string, error) {
 	if err := checkTTLs(allow); err != nil {
 		return "", err
 	}
-	gone := slices.Clip(deny)
+	// Each element once: without "destroy element", a second delete of
+	// one would fail the transaction. One opened twice gets the longer.
+	opened := map[Elem]int{}
+	var grants []Grant
 	for _, gr := range allow {
+		e := Elem{gr.Addr.Unmap(), gr.Port}
+		if i, ok := opened[e]; ok {
+			grants[i].TTL = max(grants[i].TTL, gr.TTL)
+			continue
+		}
+		opened[e] = len(grants)
+		grants = append(grants, Grant{e.Addr, e.Port, gr.TTL})
+	}
+	var gone []Elem
+	seen := map[Elem]bool{}
+	for _, e := range deny {
+		e.Addr = e.Addr.Unmap()
+		if _, ok := opened[e]; !ok && !seen[e] {
+			seen[e] = true
+			gone = append(gone, e)
+		}
+	}
+	for _, gr := range grants {
 		gone = append(gone, Elem{gr.Addr, gr.Port})
 	}
+	allow = grants
 	var b strings.Builder
 	n.forget(&b, gone)
 	addGrants(&b, allow)
@@ -1012,20 +1034,6 @@ func (n *NFT) forget(b *strings.Builder, elems []Elem) {
 	}
 	elemsScript(b, "add", elems, func(int) time.Duration { return time.Second })
 	elemsScript(b, "delete", elems, nil)
-}
-
-// AllowAll opens the grants in one transaction, on a table just made
-// (Setup): there is nothing of theirs to replace.
-func (n *NFT) AllowAll(grants []Grant) error {
-	if len(grants) == 0 {
-		return nil
-	}
-	if err := checkTTLs(grants); err != nil {
-		return err
-	}
-	var b strings.Builder
-	addGrants(&b, grants)
-	return n.run(b.String())
 }
 
 // Drops counts what one rule of the early chain dropped.

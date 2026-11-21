@@ -818,6 +818,17 @@ func TestRuleset(t *testing.T) {
 		"add element inet raycontrol allow4 { 192.0.2.1 . tcp . 443 timeout 60s }\n"; err != nil || s != want {
 		t.Errorf("one transaction:\n%s %v", s, err)
 	}
+	// Each element once, without "destroy element" above all: a second
+	// delete of one fails the transaction. One opened twice gets the
+	// longer; one both opened and closed is opened.
+	a := netip.MustParseAddr("192.0.2.1")
+	s, err = (&NFT{}).grantsScript([]Grant{{a, Port{"tcp", 443}, time.Minute}, {netip.MustParseAddr("::ffff:192.0.2.1"), Port{"tcp", 443}, time.Hour}},
+		[]Elem{{a, Port{"tcp", 443}}, {a, Port{"udp", 443}}, {a, Port{"udp", 443}}})
+	if want := "add element inet raycontrol allow4 { 192.0.2.1 . udp . 443 timeout 1s, 192.0.2.1 . tcp . 443 timeout 1s }\n" +
+		"delete element inet raycontrol allow4 { 192.0.2.1 . udp . 443, 192.0.2.1 . tcp . 443 }\n" +
+		"add element inet raycontrol allow4 { 192.0.2.1 . tcp . 443 timeout 3600s }\n"; err != nil || s != want {
+		t.Errorf("duplicates:\n%s %v", s, err)
+	}
 }
 
 func grantsOf(a netip.Addr, ports []Port, ttl time.Duration) []Grant {

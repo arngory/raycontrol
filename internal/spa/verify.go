@@ -135,7 +135,6 @@ func NewVerifier(p Params, defaultTTL, maxTTL time.Duration, maxSeen int) *Verif
 	}
 }
 
-// SetClock replaces the time source (tests, and callers that share one clock).
 // SetTTL changes the TTLs of the grants to come, keeping the replay
 // cache: a new verifier would let a packet of the last half minute in
 // again.
@@ -145,6 +144,7 @@ func (v *Verifier) SetTTL(defaultTTL, maxTTL time.Duration) {
 	v.defaultTTL, v.maxTTL = defaultTTL, maxTTL
 }
 
+// SetClock replaces the time source (tests, and callers that share one clock).
 func (v *Verifier) SetClock(now func() time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

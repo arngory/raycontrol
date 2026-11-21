@@ -259,16 +259,17 @@ func TestDeviceChanges(t *testing.T) {
 		t.Fatalf("again from an address it holds: %d transactions, %v", fw.transactions-tx, err)
 	}
 	now = now.Add(time.Minute)
-	denies := fw.denies
+	denies, tx := fw.denies, fw.transactions
 	for i := range DeviceChanges {
 		if err := knock(DeviceAddrs + i); err != nil {
 			t.Fatalf("move %d a minute later: %v", i, err)
 		}
 	}
-	// Three ports (tcp 443, udp 443, tcp 22) of each evicted address in one
-	// transaction.
-	if n := fw.denies - denies; n != DeviceChanges {
-		t.Fatalf("%d removals for %d evictions", n, DeviceChanges)
+	// The new address's grants and the three ports (tcp 443, udp 443, tcp
+	// 22) of the evicted one in one transaction (fifth review: two a
+	// change).
+	if n, m := fw.denies-denies, fw.transactions-tx; n != DeviceChanges || m != DeviceChanges {
+		t.Fatalf("%d removals in %d transactions for %d evictions", n, m, DeviceChanges)
 	}
 	if err := knock(DeviceAddrs + DeviceChanges); !errors.Is(err, ErrChanges) {
 		t.Fatalf("one move more in the minute: %v", err)
@@ -476,12 +477,15 @@ func TestFlushBackoff(t *testing.T) {
 	if n := fw.denies - denies; n != 5 {
 		t.Fatalf("%d tries in 20 s, want 5", n)
 	}
+	// A snapshot's flush that goes through ends the streak (fifth
+	// review: the backoff kept its count, and a later refusal of a new
+	// streak went to debug only).
 	fw.denyFails = 0
-	for range 64 {
-		now = now.Add(250 * time.Millisecond)
-		g.Tick()
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
 	}
-	if fw.isOpen(addr(0).String()+" tcp/443") || len(g.revoking) != 0 {
-		t.Fatal("the eviction never closed the grant")
+	if fw.isOpen(addr(0).String()+" tcp/443") || len(g.revoking) != 0 || g.flushFailures != 0 || !g.flushRetryAt.IsZero() {
+		t.Fatalf("after a flush that went through: open %v, %d to close, %d failures, retry at %v",
+			fw.isOpen(addr(0).String()+" tcp/443"), len(g.revoking), g.flushFailures, g.flushRetryAt)
 	}
 }
