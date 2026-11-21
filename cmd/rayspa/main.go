@@ -637,7 +637,8 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 
 // handleKnock checks one SPA packet with check (the gate's Handle, or
 // HandleStream for the TCP carrier) and says what came of it: at debug,
-// and at warn once a minute for a device over its quota or a flood.
+// and at warn once a minute for a device over its quota or its changes, a
+// full replay cache, a clock that stepped back or a flood.
 func handleKnock(log *slog.Logger, warn func(string) bool, check func(src, dst netip.Addr, pkt []byte) (spa.Grant, error),
 	src, dst netip.Addr, pkt []byte) {
 	g, err := check(src, dst, pkt)
@@ -649,9 +650,13 @@ func handleKnock(log *slog.Logger, warn func(string) bool, check func(src, dst n
 			if warn("quota " + g.DeviceID) {
 				log.Warn("spa: a device's knocks refused over its quota (a leaked invite? rayctl device revoke)", "device", g.DeviceID)
 			}
-		case errors.Is(err, perimeter.ErrAddrs):
-			if warn("addrs " + g.DeviceID) {
-				log.Warn("spa: a device's knocks refused: from new addresses too often (forwarded? a leaked invite? rayctl device revoke)", "device", g.DeviceID)
+		case errors.Is(err, perimeter.ErrChanges):
+			if warn("changes " + g.DeviceID) {
+				log.Warn("spa: a device's knocks refused: they change its grants too often (new addresses, TTLs that grow: forwarded? a leaked invite? rayctl device revoke)", "device", g.DeviceID)
+			}
+		case errors.Is(err, spa.ErrClockBack):
+			if warn("clock") {
+				log.Warn("spa: knocks refused as replays: dated before what the replay cache forgot. Did the node's clock step back? They pass again once it catches up")
 			}
 		case errors.Is(err, spa.ErrBusy):
 			if warn("busy") {

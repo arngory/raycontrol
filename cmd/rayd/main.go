@@ -235,6 +235,11 @@ func cmdServe(args []string) error {
 	if err := siteKeys.Check(); err != nil {
 		return fmt.Errorf("-site-key-period, -site-key-lead: %w", err)
 	}
+	// A grant of 0 would be an element with no timeout at all; the gate
+	// gives a second at least all the same.
+	if *spaTTL < time.Second || *spaMaxTTL < time.Second {
+		return fmt.Errorf("-spa-ttl %v, -spa-max-ttl %v: a second at least", *spaTTL, *spaMaxTTL)
+	}
 	dnsResolvers, err := dnscheck.ParseResolvers([]string{*dnsCheckResolvers})
 	if err != nil {
 		return fmt.Errorf("-dns-check-resolvers: %w", err)

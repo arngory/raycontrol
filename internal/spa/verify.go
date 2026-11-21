@@ -3,6 +3,7 @@ package spa
 import (
 	"container/heap"
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"sync"
@@ -35,6 +36,10 @@ var (
 	// ErrQuota: the device sent more knocks than DeviceNonces in the
 	// window; the others' still pass.
 	ErrQuota = errors.New("spa: the device's knocks are over its quota")
+	// ErrClockBack is a replay too: a packet dated no later than one the
+	// cache has forgotten (forgotten). Only a step back of the node's
+	// clock makes one of a client's fresh packets so.
+	ErrClockBack = fmt.Errorf("%w: dated before what the cache forgot (did the node's clock step back?)", ErrReplay)
 )
 
 // DeviceNonces bounds the knocks one device has made in the last 2*MaxSkew
@@ -131,6 +136,15 @@ func NewVerifier(p Params, defaultTTL, maxTTL time.Duration, maxSeen int) *Verif
 }
 
 // SetClock replaces the time source (tests, and callers that share one clock).
+// SetTTL changes the TTLs of the grants to come, keeping the replay
+// cache: a new verifier would let a packet of the last half minute in
+// again.
+func (v *Verifier) SetTTL(defaultTTL, maxTTL time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.defaultTTL, v.maxTTL = defaultTTL, maxTTL
+}
+
 func (v *Verifier) SetClock(now func() time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -228,7 +242,7 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 		return Grant{}, ErrStale
 	}
 	if !req.Time.Round(0).Add(MaxSkew + time.Second).After(v.forgotten) {
-		return Grant{}, ErrReplay
+		return Grant{}, ErrClockBack
 	}
 	if err := v.remember(nonce, d.ID, req.Time, now); err != nil {
 		// Over its quota: whose, for the operator; nothing to open.
@@ -252,7 +266,8 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 	if ttl == 0 {
 		ttl = v.defaultTTL
 	}
-	ttl = min(ttl, v.maxTTL)
+	// A second at least: nft takes 0 for no timeout at all.
+	ttl = max(min(ttl, v.maxTTL), time.Second)
 	return Grant{DeviceID: d.ID, Scope: slices.Clone(scope), TTL: ttl, Dst: req.Dst}, nil
 }
 

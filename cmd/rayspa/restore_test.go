@@ -27,23 +27,22 @@ type countingFW struct {
 	admin  []netip.Prefix
 }
 
-func (f *countingFW) Setup() error                                            { f.setups++; f.admin = nil; return nil }
-func (f *countingFW) Present() (bool, error)                                  { return f.setups > 0, nil }
-func (f *countingFW) SetSPAPorts(_, _ []uint16) error                         { return nil }
-func (f *countingFW) SetPublic([]perimeter.Port) error                        { return nil }
-func (f *countingFW) SetAdmin(p []netip.Prefix, _ []perimeter.Port) error     { f.admin = p; return nil }
-func (f *countingFW) SetInteg([]netip.Prefix, []perimeter.Port) error         { return nil }
-func (f *countingFW) SetForward([]perimeter.Port) error                       { return nil }
-func (f *countingFW) SetRelays([]netip.Prefix, []perimeter.Port) error        { return nil }
-func (f *countingFW) SetRotation(map[uint16]uint16) error                     { return nil }
-func (f *countingFW) SetACME(uint16, time.Duration) error                     { return nil }
-func (f *countingFW) SetACMEForward(time.Duration) error                      { return nil }
-func (f *countingFW) SetEgress(perimeter.Egress) error                        { return nil }
-func (f *countingFW) SetInLimit(bool) error                                   { return nil }
-func (f *countingFW) SetGuard(bool) error                                     { return nil }
-func (f *countingFW) Allow(netip.Addr, []perimeter.Port, time.Duration) error { return nil }
-func (f *countingFW) Deny(netip.Addr, []perimeter.Port) error                 { return nil }
-func (f *countingFW) Teardown() error                                         { return nil }
+func (f *countingFW) Setup() error                                        { f.setups++; f.admin = nil; return nil }
+func (f *countingFW) Present() (bool, error)                              { return f.setups > 0, nil }
+func (f *countingFW) SetSPAPorts(_, _ []uint16) error                     { return nil }
+func (f *countingFW) SetPublic([]perimeter.Port) error                    { return nil }
+func (f *countingFW) SetAdmin(p []netip.Prefix, _ []perimeter.Port) error { f.admin = p; return nil }
+func (f *countingFW) SetInteg([]netip.Prefix, []perimeter.Port) error     { return nil }
+func (f *countingFW) SetForward([]perimeter.Port) error                   { return nil }
+func (f *countingFW) SetRelays([]netip.Prefix, []perimeter.Port) error    { return nil }
+func (f *countingFW) SetRotation(map[uint16]uint16) error                 { return nil }
+func (f *countingFW) SetACME(uint16, time.Duration) error                 { return nil }
+func (f *countingFW) SetACMEForward(time.Duration) error                  { return nil }
+func (f *countingFW) SetEgress(perimeter.Egress) error                    { return nil }
+func (f *countingFW) SetInLimit(bool) error                               { return nil }
+func (f *countingFW) SetGuard(bool) error                                 { return nil }
+func (f *countingFW) SetGrants([]perimeter.Grant, []perimeter.Elem) error { return nil }
+func (f *countingFW) Teardown() error                                     { return nil }
 
 func savedSnapshot() *perimeterv1.Snapshot {
 	return &perimeterv1.Snapshot{

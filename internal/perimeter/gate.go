@@ -29,11 +29,28 @@ var ErrPending = errors.New("perimeter: snapshot applied in part, the rest follo
 // from both (knownShare).
 var ErrFlood = errors.New("perimeter: SPA packets over what the node checks: a flood?")
 
-// ErrAddrs: a device brings more new source addresses than DeviceAddrs a
-// minute, past the DeviceAddrs it holds: each would close one of its grants
-// (an nft transaction of its own), and a device that moves this often is
-// no phone changing networks but its packets forwarded, or a leaked invite.
-var ErrAddrs = errors.New("perimeter: the device's knocks come from new addresses too often")
+// ErrChanges: a device's knocks change its grants in the table more than
+// DeviceChanges times a minute, past as many at once. Each change is an
+// nft transaction under the gate's lock (3 ms an element added, some 20 ms
+// one replaced or removed: fourth review of the protocol review's change),
+// and a device that changes them this often (new addresses, TTLs that
+// grow) is no phone but its packets forwarded, or a leaked invite. A knock
+// that leaves the table as it is takes none (handle).
+var ErrChanges = errors.New("perimeter: the device's knocks change its grants too often")
+
+// DeviceChanges bounds the knocks a device changes the table with: as
+// many a minute, as many at once (ErrChanges).
+const DeviceChanges = 32
+
+// renewSlack is how much less than its TTL a knock may leave a grant with
+// to spare the table a change: the grant lasts at least TTL − slack.
+func renewSlack(ttl time.Duration) time.Duration { return min(30*time.Second, ttl/2) }
+
+// wholeSeconds is d rounded up to whole seconds, as nft takes it: never 0,
+// which would be no timeout at all.
+func wholeSeconds(d time.Duration) time.Duration {
+	return max(time.Second, (d + time.Second - 1).Truncate(time.Second))
+}
 
 // DeviceAddrs bounds the source addresses one device holds grants from at
 // once: a grant from one more closes the one that ends first. Without it
@@ -45,34 +62,35 @@ var ErrAddrs = errors.New("perimeter: the device's knocks come from new addresse
 const DeviceAddrs = 32
 
 // The budgets of SPA checks, at what a packet costs that opens for none of
-// the devices (three epochs each, 1.5 µs a device on a 2.1 GHz Xeon).
+// the devices (three epochs each, 2 µs a device on a 2.1 GHz Xeon at 288
+// bytes, the longest a node takes: LenMax).
 // Every check runs under the gate's lock, and the UDP ones on the one
 // goroutine that reads NFLOG: together they leave the core more than half
 // of its time (third review of the protocol review's change).
 //   - verifyShare each: packets from sources without a grant (UDP), and
 //     packets of the TCP carrier. A flood past one costs no check.
+//     At least verifyRateMin a second: past 75 000 devices a budget costs
+//     more than its share.
 //   - knownShare: a packet from a source with a grant (an IPv4 address, an
 //     IPv6 /64), tried against the devices that hold it, at most knownTry
-//     of them, and knownSourceRate a second of one source: one spoofing a
-//     client's source drains that source alone. A packet none of them
-//     opens goes on to the budget of its kind.
+//     of them, each a check of the budget, and knownSourceRate a second of
+//     one source: one spoofing a client's source drains that source alone.
+//     A packet none of them opens goes on to the budget of its kind.
 const (
 	verifyShare     = 150 * time.Millisecond
 	knownShare      = 100 * time.Millisecond
-	verifyPerDevice = 1500 * time.Nanosecond
-	verifyRateMin   = 10
-	verifyRateMax   = 100000
-	knownTry        = 8
+	verifyPerDevice = 2 * time.Microsecond
+	verifyRateMin   = 1
+	knownTry        = 32
 	knownSourceRate = 8
 )
 
 func verifyRate(devices int) float64 {
-	return min(max(float64(verifyShare)/float64(max(devices, 1)*int(verifyPerDevice)), verifyRateMin), verifyRateMax)
+	return max(float64(verifyShare)/float64(max(devices, 1)*int(verifyPerDevice)), verifyRateMin)
 }
 
-// knownRate is the known sources' budget: knownShare at knownTry devices a
-// packet.
-var knownRate = float64(knownShare) / float64(knownTry*int(verifyPerDevice))
+// knownRate is the known sources' budget in checks of one device a second.
+var knownRate = float64(knownShare) / float64(verifyPerDevice)
 
 // knownSource is a source with a grant: the devices that hold one from its
 // addresses, how many addresses each, and its own budget.
@@ -124,7 +142,11 @@ type Gate struct {
 	regrant    map[grantKey]bool // grants to set to their longest holder left
 	failures   int               // catching up failed so many times in a row
 	retryAt    time.Time         // and is tried again from then on
-	forward    []Port            // every service port: what a relay forwards
+	// Closing and shortening grants (flushLocked) out of a snapshot failed
+	// so many times in a row, and is tried again from then on.
+	flushFailures int
+	flushRetryAt  time.Time
+	forward       []Port // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders map[grantKey]map[string]time.Time
@@ -137,9 +159,9 @@ type Gate struct {
 	known                             map[netip.Prefix]*knownSource
 	budget, knownBudget, streamBudget bucket
 	budgetRate                        float64
-	// moves are the devices' budgets of new addresses past DeviceAddrs
-	// (ErrAddrs).
-	moves    map[string]*moveBudget
+	// changes are the devices' budgets of changes to the table
+	// (ErrChanges).
+	changes  map[string]*changeBudget
 	udpPorts []uint16
 	tcpPorts []uint16
 	// ACME window as last applied.
@@ -170,7 +192,7 @@ type Gate struct {
 // NewGate returns a gate that drives fw.
 func NewGate(fw Firewall, log *slog.Logger) *Gate {
 	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{},
-		addrs: map[string]map[netip.Addr]time.Time{}, known: map[netip.Prefix]*knownSource{}, moves: map[string]*moveBudget{},
+		addrs: map[string]map[netip.Addr]time.Time{}, known: map[netip.Prefix]*knownSource{}, changes: map[string]*changeBudget{},
 		budgetRate: verifyRateMin}
 }
 
@@ -520,8 +542,7 @@ func (g *Gate) catchUpLocked(now time.Time) error {
 		if g.restoring {
 			// Into whatever table there is: a Setup that keeps failing
 			// should not keep revoked grants open, or long.
-			_ = g.regrantLocked()
-			_ = g.denyLocked()
+			_ = g.flushLocked()
 			if err := g.restoreLocked(g.pending); err != nil {
 				return err
 			}
@@ -555,7 +576,7 @@ func (g *Gate) applyLocked(u *update) error {
 	g.adoptLocked(u)
 	var errs []error
 	// Revocations first: they wait for nothing else.
-	errs = append(errs, g.regrantLocked(), g.denyLocked())
+	errs = append(errs, g.flushLocked())
 	if !slices.Equal(u.public, g.public) {
 		if err := g.fw.SetPublic(u.public); err != nil {
 			errs = append(errs, err)
@@ -624,22 +645,24 @@ func (g *Gate) inLimitLocked() error {
 
 // adoptLocked takes the devices, their scopes and the SPA parameters of u,
 // and drops the holders u revokes: their grants wait in revoking until the
-// firewall closes them (denyLocked), and a restore does not open them again.
+// firewall closes them (flushLocked), and a restore does not open them again.
 func (g *Gate) adoptLocked(u *update) {
 	// A new verifier also drops the replay cache, so keep it unless the
-	// parameters really changed.
-	if g.verifier == nil || u.params != g.params || u.defTTL != g.defaultTTL || u.maxTTL != g.maxTTL {
+	// parameters really changed: new TTLs keep it.
+	if g.verifier == nil || u.params != g.params {
 		g.verifier = spa.NewVerifier(u.params, u.defTTL, u.maxTTL, 100000)
 		g.verifier.SetClock(g.now)
+	} else if u.defTTL != g.defaultTTL || u.maxTTL != g.maxTTL {
+		g.verifier.SetTTL(u.defTTL, u.maxTTL)
 	}
 	g.verifier.SetDevices(u.devices)
 	g.budgetRate = verifyRate(len(u.devices))
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
-	for dev := range g.moves {
+	for dev := range g.changes {
 		if _, ok := g.allowed[dev]; !ok {
-			delete(g.moves, dev)
+			delete(g.changes, dev)
 		}
 	}
 	g.inLimitOff = u.connLimitOff
@@ -691,17 +714,17 @@ func longest(devs map[string]time.Time) time.Time {
 	return until
 }
 
-// regrantLocked sets grants that lost a holder to their longest holder
-// left, one transaction an address and time; those the firewall refuses
-// stay to do.
-func (g *Gate) regrantLocked() error {
-	var errs []error
-	now := g.now()
-	type addrTTL struct {
-		addr netip.Addr
-		ttl  time.Duration
+// flushLocked closes the revoked grants and sets those that lost a holder
+// to their longest holder left, all in one transaction: a removal waits
+// for the kernel, some 20 ms, once a transaction (fourth review of the
+// protocol review's change). What the firewall refuses stays to do, and
+// the snapshot with it.
+func (g *Gate) flushLocked() error {
+	if len(g.revoking)+len(g.regrant) == 0 {
+		return nil
 	}
-	byAddr := map[addrTTL][]Port{}
+	now := g.now()
+	var allow []Grant
 	for key := range g.regrant {
 		ttl := longest(g.holders[key]).Sub(now)
 		if ttl <= 0 {
@@ -711,51 +734,52 @@ func (g *Gate) regrantLocked() error {
 			g.revokeLater(key)
 			continue
 		}
-		// Whole seconds up, as the firewall takes them: never 0, which
-		// would be no timeout at all.
-		at := addrTTL{key.addr, (ttl + time.Second - 1).Truncate(time.Second)}
-		byAddr[at] = append(byAddr[at], key.port)
+		allow = append(allow, Grant{Addr: key.addr, Port: key.port, TTL: wholeSeconds(ttl)})
 	}
-	for at, ports := range byAddr {
-		if err := g.fw.Allow(at.addr, ports, at.ttl); err != nil {
-			errs = append(errs, fmt.Errorf("shortening grants on %v: %w", ports, err))
-			continue
-		}
-		for _, p := range ports {
-			delete(g.regrant, grantKey{at.addr, p})
+	deny := make([]Elem, 0, len(g.revoking))
+	for key := range g.revoking {
+		if !g.regrant[key] {
+			deny = append(deny, Elem{key.addr, key.port})
 		}
 	}
-	return errors.Join(errs...)
+	if err := g.fw.SetGrants(allow, deny); err != nil {
+		return fmt.Errorf("closing %d grants and shortening %d: %w", len(deny), len(allow), err)
+	}
+	clear(g.regrant)
+	clear(g.revoking)
+	g.log.Debug("grants closed or shortened", "closed", len(deny), "shortened", len(allow))
+	return nil
 }
 
-// revokeLater puts a grant to close in revoking (denyLocked).
+// flushLaterLocked runs flushLocked out of a snapshot (an eviction, a
+// tick), less and less often while the firewall refuses (1 s doubling to
+// 30 s); the first refusal of a streak is a warning, the rest go to debug.
+func (g *Gate) flushLaterLocked(now time.Time) {
+	if len(g.revoking)+len(g.regrant) == 0 || now.Before(g.flushRetryAt) {
+		return
+	}
+	if err := g.flushLocked(); err != nil {
+		g.flushFailures++
+		g.flushRetryAt = now.Add(min(30*time.Second, time.Second<<min(g.flushFailures-1, 5)))
+		if g.flushFailures == 1 {
+			g.log.Warn("grants to close or shorten: the firewall refused, trying again", "err", err)
+		} else {
+			g.log.Debug("grants to close or shorten: the firewall refused again", "failures", g.flushFailures, "err", err)
+		}
+		return
+	}
+	if g.flushFailures > 0 {
+		g.log.Info("grants closed or shortened after refusals", "failures", g.flushFailures)
+	}
+	g.flushFailures, g.flushRetryAt = 0, time.Time{}
+}
+
+// revokeLater puts a grant to close in revoking (flushLocked).
 func (g *Gate) revokeLater(key grantKey) {
 	if g.revoking == nil {
 		g.revoking = map[grantKey]bool{}
 	}
 	g.revoking[key] = true
-}
-
-// denyLocked closes the revoked grants, one transaction an address (a
-// removal waits for the kernel: 17 ms each, third review); those the
-// firewall refuses stay to do, and the snapshot with them.
-func (g *Gate) denyLocked() error {
-	var errs []error
-	byAddr := map[netip.Addr][]Port{}
-	for key := range g.revoking {
-		byAddr[key.addr] = append(byAddr[key.addr], key.port)
-	}
-	for addr, ports := range byAddr {
-		if err := g.fw.Deny(addr, ports); err != nil {
-			errs = append(errs, fmt.Errorf("closing revoked grants on %v: %w", ports, err))
-			continue
-		}
-		for _, p := range ports {
-			delete(g.revoking, grantKey{addr, p})
-		}
-		g.log.Debug("revoked", "addr", addr, "ports", ports)
-	}
-	return errors.Join(errs...)
 }
 
 // egressLocked puts the egress policy of the last snapshot in force, into
@@ -890,8 +914,11 @@ func (g *Gate) handle(src, dst netip.Addr, pkt []byte, stream bool) (spa.Grant, 
 	grant, err := spa.Grant{}, spa.ErrAuth
 	// A source with a grant: its own devices first, apart from the flood
 	// of the others, UDP and TCP alike.
-	if ks := g.known[knockSource(src)]; ks != nil && ks.b.take(knownSourceRate, now) && g.knownBudget.take(knownRate, now) {
-		ids := make([]string, 0, min(len(ks.devices), knownTry))
+	// Each device tried is a check of the budget; the source's own budget
+	// first takes nothing when the other refuses.
+	if ks, n := g.knownLocked(src); ks != nil && g.knownBudget.has(knownRate, n, now) && ks.b.take(knownSourceRate, 1, now) {
+		g.knownBudget.take(knownRate, n, now)
+		ids := make([]string, 0, int(n))
 		for dev := range ks.devices {
 			if len(ids) == knownTry {
 				break
@@ -905,7 +932,7 @@ func (g *Gate) handle(src, dst netip.Addr, pkt []byte, stream bool) (spa.Grant, 
 		if stream {
 			budget = &g.streamBudget
 		}
-		if !budget.take(g.budgetRate, now) {
+		if !budget.take(g.budgetRate, 1, now) {
 			return spa.Grant{}, ErrFlood
 		}
 		grant, err = g.verifier.Verify(pkt)
@@ -916,41 +943,85 @@ func (g *Gate) handle(src, dst netip.Addr, pkt []byte, stream bool) (spa.Grant, 
 	if grant.Dst.IsValid() && !spa.OwnDst(grant.Dst, dst, g.own) {
 		return grant, spa.ErrDst
 	}
-	if !g.mayMoveLocked(grant.DeviceID, src.Unmap(), now) {
-		return grant, ErrAddrs
-	}
-	ports := g.portsFor(grant.Scope)
-	until := now.Add(grant.TTL)
-	// A grant lasts as long as its longest holder: a shorter knock from
-	// the same address (CGNAT) does not cut another device's grant short.
-	byTTL := map[time.Duration][]Port{}
-	for _, p := range ports {
-		end := until
-		for dev, u := range g.holders[grantKey{src.Unmap(), p}] {
-			if dev != grant.DeviceID && u.After(end) {
-				end = u // another device's, longer
+	return grant, g.grantLocked(grant, src.Unmap(), now)
+}
+
+// grantLocked opens grant's ports to src, in one transaction, or leaves
+// the table as it is when that changes a port's end by less than
+// renewSlack (another device's longer grant from src, a knock again). A
+// knock that changes the table takes one of the device's changes
+// (ErrChanges).
+func (g *Gate) grantLocked(grant spa.Grant, src netip.Addr, now time.Time) error {
+	dev := grant.DeviceID
+	ttl := max(grant.TTL, time.Second) // nft would take 0 for no timeout at all
+	until := now.Add(ttl)
+	var writes []Grant
+	holds := map[grantKey]time.Time{}
+	for _, p := range g.portsFor(grant.Scope) {
+		key := grantKey{src, p}
+		devs := g.holders[key]
+		var others time.Time
+		for d, u := range devs {
+			if d != dev && u.After(others) {
+				others = u
 			}
 		}
-		byTTL[end.Sub(now)] = append(byTTL[end.Sub(now)], p)
-	}
-	for _, ttl := range slices.Sorted(maps.Keys(byTTL)) {
-		ps := byTTL[ttl]
-		if err := g.fw.Allow(src, ps, ttl); err != nil {
-			return grant, err
+		// A grant lasts as long as its longest holder: a shorter knock
+		// from the same address (CGNAT) does not cut another device's
+		// grant short. Its own shorter knock is the device's to make.
+		end, cur := maxTime(until, others), longest(devs)
+		if !g.revoking[key] && !g.regrant[key] && !end.Before(cur) && end.Sub(cur) < renewSlack(ttl) {
+			// The element ends at cur, at least TTL − slack from now: the
+			// device holds it as long as it lasts.
+			holds[key] = minTime(until, cur)
+			continue
 		}
-		// Held as soon as open: a revocation must find what is open.
-		for _, p := range ps {
-			key := grantKey{src.Unmap(), p}
-			if g.holders[key] == nil {
-				g.holders[key] = map[string]time.Time{}
-			}
-			delete(g.revoking, key) // held again: not to be closed
-			delete(g.regrant, key)  // set to its longest just now
-			g.holders[key][grant.DeviceID] = until
-		}
+		writes = append(writes, Grant{Addr: src, Port: p, TTL: wholeSeconds(end.Sub(now))})
+		holds[key] = until
 	}
-	g.holdAddrLocked(grant.DeviceID, src.Unmap(), now, until)
-	return grant, nil
+	_, held := g.addrs[dev][src]
+	evicts := !held && g.liveAddrsLocked(dev, now) >= DeviceAddrs
+	if (len(writes) > 0 || evicts) && !g.changeLocked(dev, now) {
+		return ErrChanges
+	}
+	if err := g.fw.SetGrants(writes, nil); err != nil {
+		return err
+	}
+	// Held as soon as open: a revocation must find what is open.
+	for key, u := range holds {
+		if g.holders[key] == nil {
+			g.holders[key] = map[string]time.Time{}
+		}
+		delete(g.revoking, key) // held again: not to be closed
+		delete(g.regrant, key)  // set to its longest just now
+		g.holders[key][dev] = u
+	}
+	g.holdAddrLocked(dev, src, now)
+	return nil
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// knownLocked is src's known source, if it is one, and how many of its
+// devices a packet from it is tried against.
+func (g *Gate) knownLocked(src netip.Addr) (*knownSource, float64) {
+	ks := g.known[knockSource(src)]
+	if ks == nil {
+		return nil, 0
+	}
+	return ks, float64(min(len(ks.devices), knownTry))
 }
 
 // knockSource is what the budgets know a source by: an IPv4 address, an
@@ -971,63 +1042,66 @@ type bucket struct {
 	last   time.Time
 }
 
-func (b *bucket) take(rate float64, now time.Time) bool {
+// take takes n tokens of a bucket that gets rate a second, as many at
+// once, if it has them.
+func (b *bucket) take(rate, n float64, now time.Time) bool {
+	if !b.has(rate, n, now) {
+		return false
+	}
+	b.tokens -= n
+	return true
+}
+
+// has reports whether the bucket has n tokens, taking none.
+func (b *bucket) has(rate, n float64, now time.Time) bool {
 	if b.last.IsZero() {
 		b.tokens = rate
 	} else {
 		b.tokens = min(rate, b.tokens+max(now.Sub(b.last).Seconds(), 0)*rate)
 	}
 	b.last = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
+	return b.tokens >= max(n, 1)
 }
 
-// moveBudget is a device's budget of new addresses past DeviceAddrs:
-// DeviceAddrs a minute, as many at once.
-type moveBudget struct {
+// changeBudget is a device's budget of changes to the table: DeviceChanges
+// a minute, as many at once.
+type changeBudget struct {
 	tokens float64
 	last   time.Time
 }
 
-// mayMoveLocked reports whether device may hold a grant from src: one it
-// holds already, a place left of DeviceAddrs, or a move left in its budget
-// (ErrAddrs), which it takes.
-func (g *Gate) mayMoveLocked(device string, src netip.Addr, now time.Time) bool {
-	addrs := g.addrs[device]
-	if _, ok := addrs[src]; ok {
-		return true
+// changeLocked takes one of device's changes, if it has one left.
+func (g *Gate) changeLocked(device string, now time.Time) bool {
+	c := g.changes[device]
+	if c == nil {
+		c = &changeBudget{tokens: DeviceChanges, last: now}
+		g.changes[device] = c
 	}
+	c.tokens = min(DeviceChanges, c.tokens+max(now.Sub(c.last).Minutes(), 0)*DeviceChanges)
+	c.last = now
+	if c.tokens < 1 {
+		return false
+	}
+	c.tokens--
+	return true
+}
+
+// liveAddrsLocked is how many addresses device holds grants from now.
+func (g *Gate) liveAddrsLocked(device string, now time.Time) int {
 	live := 0
-	for _, u := range addrs {
+	for _, u := range g.addrs[device] {
 		if now.Before(u) {
 			live++
 		}
 	}
-	if live < DeviceAddrs {
-		return true
-	}
-	m := g.moves[device]
-	if m == nil {
-		m = &moveBudget{tokens: DeviceAddrs, last: now}
-		g.moves[device] = m
-	}
-	m.tokens = min(DeviceAddrs, m.tokens+max(now.Sub(m.last).Minutes(), 0)*DeviceAddrs)
-	m.last = now
-	if m.tokens < 1 {
-		return false
-	}
-	m.tokens--
-	return true
+	return live
 }
 
 // holdAddrLocked counts src among the addresses device holds grants from,
 // until its grants from there end; past DeviceAddrs the one whose grants
 // end first closes them (those another device holds stay, as long as it
 // holds them).
-func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Time) {
+func (g *Gate) holdAddrLocked(device string, src netip.Addr, now time.Time) {
 	addrs := g.addrs[device]
 	if addrs == nil {
 		addrs = map[netip.Addr]time.Time{}
@@ -1036,7 +1110,7 @@ func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Tim
 	if _, ok := addrs[src]; !ok {
 		g.knowLocked(device, src)
 	}
-	addrs[src] = g.heldUntilLocked(device, src, until)
+	addrs[src] = g.heldUntilLocked(device, src, time.Time{})
 	if len(addrs) <= DeviceAddrs {
 		return
 	}
@@ -1055,8 +1129,7 @@ func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Tim
 		g.dropAddrLocked(device, first)
 		g.releaseLocked(device, first)
 	}
-	_ = g.regrantLocked()
-	_ = g.denyLocked()
+	g.flushLaterLocked(now)
 }
 
 // heldUntilLocked is when device's grants from addr end: the latest of
@@ -1207,10 +1280,9 @@ func (g *Gate) Tick() ([]uint16, error) {
 		}
 	}
 	// Grants an eviction closed or shortened that the firewall refused
-	// then: again each tick, when no snapshot or restore does it.
-	if !g.restoring && g.pending == nil && len(g.revoking)+len(g.regrant) > 0 {
-		_ = g.regrantLocked()
-		_ = g.denyLocked()
+	// then: again, less and less often, when no snapshot or restore does it.
+	if !g.restoring && g.pending == nil {
+		g.flushLaterLocked(now)
 	}
 	if err := g.slotsLocked(); err != nil {
 		return nil, err
@@ -1266,7 +1338,7 @@ func (g *Gate) restoreLocked(u *update) error {
 	}
 	for key, devs := range g.holders {
 		if ttl := longest(devs).Sub(now); ttl > 0 {
-			c.Grants = append(c.Grants, Grant{Addr: key.addr, Port: key.port, TTL: ttl})
+			c.Grants = append(c.Grants, Grant{Addr: key.addr, Port: key.port, TTL: wholeSeconds(ttl)})
 		}
 	}
 	if g.verifier != nil {
@@ -1377,12 +1449,8 @@ func (g *Gate) restoreSteps(c TableContents) error {
 		if err := all.AllowAll(c.Grants); err != nil {
 			return err
 		}
-	} else {
-		for _, gr := range c.Grants {
-			if err := g.fw.Allow(gr.Addr, []Port{gr.Port}, gr.TTL); err != nil {
-				return err
-			}
-		}
+	} else if err := g.fw.SetGrants(c.Grants, nil); err != nil {
+		return err
 	}
 	// Last, with the grants back: relay_check cuts what nothing lets in.
 	if c.Relayed {

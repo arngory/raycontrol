@@ -551,7 +551,7 @@ func TestReplayAfterForgottenStepBack(t *testing.T) {
 	// NTP steps the clock back to the truth; the packet's time is within
 	// the skew again.
 	clock, mono = truth.Add(2*time.Minute+10*time.Second), 70*time.Second
-	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) || !errors.Is(err, ErrClockBack) {
 		t.Fatalf("its packet after the step back: err = %v", err)
 	}
 	// A new packet of a time after every one forgotten passes.
@@ -581,5 +581,27 @@ func TestVerifyDevices(t *testing.T) {
 	}
 	if _, err := v.VerifyDevices(pa, []string{"a"}); !errors.Is(err, ErrReplay) {
 		t.Fatalf("again: %v", err)
+	}
+}
+
+// TestTTLFloorAndSetTTL: a grant lasts a second at least, whatever the
+// node's TTLs (nft takes 0 for no timeout at all: fourth review), and new
+// TTLs keep the replay cache.
+func TestTTLFloorAndSetTTL(t *testing.T) {
+	clock := time.Unix(1767225600, 0)
+	v := NewVerifier(testParams(), 0, 0, 1000)
+	v.SetClock(func() time.Time { return clock })
+	v.SetDevices([]Device{{ID: "a", Key: fill32(0x11), Allowed: []uint16{1}}})
+	pkt := seal(t, 0x11, Request{Time: clock})
+	g, err := v.Verify(pkt)
+	if err != nil || g.TTL != time.Second {
+		t.Fatalf("TTLs of 0: %v %v", g.TTL, err)
+	}
+	v.SetTTL(10*time.Minute, time.Hour)
+	if _, err := v.Verify(pkt); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replayed after new TTLs: %v", err)
+	}
+	if g, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil || g.TTL != 10*time.Minute {
+		t.Fatalf("the new default: %v %v", g.TTL, err)
 	}
 }
