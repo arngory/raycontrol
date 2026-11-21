@@ -282,12 +282,13 @@ type inviteNode struct {
 	v3      string
 	revoked []string
 	asked   *nodev1.CreateInviteRequest
+	noPIN   bool // a node before v0.13: it drops the field
 }
 
 func (n *inviteNode) CreateInvite(_ context.Context, req *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
 	n.asked = req.Msg
 	pin := ""
-	if req.Msg.Pin {
+	if req.Msg.Pin && !n.noPIN {
 		pin = "123456"
 	}
 	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: &nodev1.Invite{Id: "inv1", User: "alice", Name: "phone", Role: req.Msg.Role},
@@ -319,9 +320,16 @@ func TestInvitePINDefault(t *testing.T) {
 			t.Errorf("%v: asked for a PIN %v, want %v", c.args, n.asked.Pin, c.pin)
 		}
 	}
+	// A node before v0.13 makes the admin's invite without its PIN: it is
+	// withdrawn, and the error says how to go without one.
+	old := &inviteNode{noPIN: true}
+	err := (&cli{c: old}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-o", filepath.Join(t.TempDir(), "i")})
+	if err == nil || !strings.Contains(err.Error(), "-pin=false") || !slices.Equal(old.revoked, []string{"inv1"}) {
+		t.Errorf("an old node, an admin's invite: %v, withdrew %v", err, old.revoked)
+	}
 	// Through ssh without -t: the QR and a PIN by default do not go
 	// together, and the error says how to go without it.
-	err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-qr"})
+	err = (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-qr"})
 	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "-pin=false") {
 		t.Errorf("-role admin -qr without a terminal: %v", err)
 	}

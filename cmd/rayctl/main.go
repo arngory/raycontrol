@@ -80,8 +80,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             target=HOST:PORT (who answers non-clients, checked as at
                                             creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N|0|auto (Brutal's ceiling; 0: none; auto,
-                                            the default: the speed of the node's link, where the kernel
-                                            knows it), down_mbps=N (told to clients, 0: none);
+                                            the default: the speed of the node's link, 1 Gbit/s or more,
+                                            where the kernel knows it), down_mbps=N (told to clients,
+                                            0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
                                             rayctl apply), udp=on|off (UDP as HTTP/3 datagrams,
                                             naive-udp-v1; off by default; then rayctl apply),

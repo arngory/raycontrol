@@ -41,9 +41,12 @@ wg0	00000000	00000000	0201	0	0	0	00000000	0	0	0
 	if got := defaultIface(filepath.Join(dir, "none"), filepath.Join(dir, "none6")); got != "" {
 		t.Errorf("no tables: %q", got)
 	}
-	// A name that is a path is none.
+	// A name that is a path is none, nor the "*" of a blackhole.
 	if got := defaultIface4(strings.NewReader("h\n../x\t00000000\t0\t0003\t0\t0\t0\t00000000\n")); got != "" {
 		t.Errorf("a path for a name: %q", got)
+	}
+	if got := defaultIface4(strings.NewReader("h\n*\t00000000\t00000000\t0001\t0\t0\t0\t00000000\neth0\t00000000\t010200C0\t0003\t0\t0\t100\t00000000\n")); got != "eth0" {
+		t.Errorf("a blackhole default first: %q", got)
 	}
 }
 
@@ -74,10 +77,15 @@ func TestBrutalCeiling(t *testing.T) {
 	}{
 		{`{}`, 0, 0, ""},
 		{`{}`, 1000, 1000, "link"},
+		{`{}`, 100, 0, ""}, // doubtful: an emulated NIC
 		{`{"up_mbps":500}`, 1000, 500, "up_mbps"},
 		{`{"up_mbps":0}`, 1000, 0, "up_mbps"},
 		{`{"down_mbps":50}`, 0, 0, ""},
-		{``, 100, 100, "link"},
+		{``, 10000, 10000, "link"},
+		// Written by hand, no whole number: not set.
+		{`{"up_mbps":"500"}`, 1000, 1000, "link"},
+		{`{"up_mbps":500.5}`, 0, 0, ""},
+		{`{"up_mbps":-1}`, 1000, 1000, "link"},
 	} {
 		if up, from := BrutalCeiling(c.settings, c.link); up != c.up || from != c.from {
 			t.Errorf("%s, link %d: %d %q", c.settings, c.link, up, from)

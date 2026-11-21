@@ -7,8 +7,8 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// Hysteria2 without a ceiling, or with a doubtful link's, is in the
-// status; one with up_mbps of its own, 0 too, is not, nor one disabled
+// Hysteria2 without a ceiling (a link's speed unknown, or too low to
+// trust) is in the status; one with up_mbps of its own, 0 too, is not, nor one disabled
 // (protocol review 2026-11, M1).
 func TestBrutalWarnings(t *testing.T) {
 	services := []store.Service{
@@ -26,8 +26,8 @@ func TestBrutalWarnings(t *testing.T) {
 		mbps int
 		want string // in the one warning; "": none
 	}{
-		{0, "hy2-masq hm: Brutal has no ceiling"},
-		{100, "hy2-masq hm: Brutal up to 100 Mbit/s, the speed ens3 tells"},
+		{0, "hy2-masq hm: Brutal has no ceiling, the speed of the node's link unknown"},
+		{100, "hy2-masq hm: Brutal has no ceiling: ens3 tells 100 Mbit/s"},
 		{1000, ""},
 		{10000, ""},
 	} {

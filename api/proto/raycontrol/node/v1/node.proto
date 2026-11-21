@@ -688,8 +688,8 @@ message GetStatusResponse {
   // absent through the remote API.
   Egress egress = 12 [(google.api.field_visibility).restriction = "ADMIN"];
   // What the operator should see to: a Hysteria2 whose Brutal has no
-  // ceiling, or one only as high as an interface that may not tell the
-  // channel's speed (protocol review 2026-11, M1). Each line is whole.
+  // ceiling, the speed of the node's link unknown or too low to trust
+  // (protocol review 2026-11, M1). Each line is whole.
   repeated string warnings = 13 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 

@@ -63,7 +63,7 @@ integration status`. Дальше — события (§4).
 rayctl user add integrations -services ""          # служебный пользователь без сервисов
 rayctl device invite integrations billing -role billing [-allow 198.51.100.7,2001:db8:7::/64] [-ttl 1h] [-pin=false]
 # на хосте интеграции (PIN у billing по умолчанию, api-v1 §3; на терминале rayctl спросит его сам):
-rayctl remote enroll 'RCINV3:…' -o billing.rcdev   # файл устройства 0600: rcdev1 и PEM ключа (api-v1 §4)
+rayctl remote enroll -o billing.rcdev 'RCINV3:…'   # файл устройства 0600: rcdev1 и PEM ключа (api-v1 §4)
 ```
 
 - Приглашение с ролью `billing` или `support` делают root и группа `raycontrol` на ноде и admin-устройства.

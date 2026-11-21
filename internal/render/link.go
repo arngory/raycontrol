@@ -8,18 +8,43 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// LinkTrusted is the lowest link speed, Mbit/s, taken as Brutal's
+// ceiling: below it the kernel's word is doubtful (an emulated rtl8139
+// tells 100 whatever the channel), and the status asks for up_mbps.
+const LinkTrusted = 1000
+
+// hostLink is the first speed HostLink read that was known: kept until
+// rayd restarts, as a change of it restarts Hysteria2 and cuts its
+// sessions (a bond losing a port, a bridge's speed following its ports).
+var hostLink struct {
+	sync.Mutex
+	mbps  int
+	iface string
+}
 
 // HostLink is the speed, Mbit/s, of the interface the default route goes
 // out of (IPv4's, else IPv6's), as the kernel knows it, and the
 // interface's name. 0 when it does not know (most virtual NICs report no
 // speed) or there is no default route; the name may be there all the same.
+// Once known it stays as first read (hostLink).
 func HostLink() (mbps int, iface string) {
+	hostLink.Lock()
+	defer hostLink.Unlock()
+	if hostLink.mbps > 0 {
+		return hostLink.mbps, hostLink.iface
+	}
 	iface = defaultIface("/proc/net/route", "/proc/net/ipv6_route")
 	if iface == "" {
 		return 0, ""
 	}
-	return linkSpeed("/sys/class/net", iface), iface
+	mbps = linkSpeed("/sys/class/net", iface)
+	if mbps > 0 {
+		hostLink.mbps, hostLink.iface = mbps, iface
+	}
+	return mbps, iface
 }
 
 // defaultIface is the interface of the default route of the lowest metric
@@ -92,9 +117,10 @@ func defaultIface6(r io.Reader) string {
 	return best
 }
 
-// ifaceName is a name the kernel could give an interface: no path in it.
+// ifaceName is a name the kernel could give an interface: no path in it,
+// and not the "*" of a route with none (blackhole).
 func ifaceName(s string) bool {
-	return s != "" && s != "." && s != ".." && len(s) < 16 && !strings.ContainsAny(s, "/\x00")
+	return s != "" && s != "." && s != ".." && s != "*" && len(s) < 16 && !strings.ContainsAny(s, "/\x00")
 }
 
 // linkSpeed is /sys/class/net/<iface>/speed, Mbit/s; 0 when unknown (-1,
@@ -114,18 +140,19 @@ func linkSpeed(sys, iface string) int {
 // BrutalCeiling is the ceiling of a Hysteria2 service's Brutal (R4-16,
 // protocol review 2026-11, M1), Mbit/s, and where it comes from: up_mbps
 // set ("up_mbps", 0 when set to none), else the speed of the node's link
-// ("link"), else none (0, ""). The server sends each client at the rate
-// the client asks for, so without a ceiling one client may fill the
-// channel and starve the others.
+// from LinkTrusted on ("link"), else none (0, ""). The server sends each
+// client at the rate the client asks for, so without a ceiling one client
+// may ask for more than the port. An up_mbps that is no whole number
+// (written by hand: service add -settings) counts as not set.
 func BrutalCeiling(settings string, linkMbps int) (mbps int, from string) {
 	var s struct {
-		Up *int `json:"up_mbps"`
+		Up json.RawMessage `json:"up_mbps"`
 	}
 	_ = json.Unmarshal([]byte(settings), &s)
-	switch {
-	case s.Up != nil:
-		return max(*s.Up, 0), "up_mbps"
-	case linkMbps > 0:
+	if n, err := strconv.Atoi(string(s.Up)); err == nil && n >= 0 {
+		return n, "up_mbps"
+	}
+	if linkMbps >= LinkTrusted {
 		return linkMbps, "link"
 	}
 	return 0, ""

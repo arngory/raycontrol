@@ -459,15 +459,12 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	return connect.NewResponse(resp), nil
 }
 
-// brutalLow is a link speed below which the kernel's word is doubtful: an
-// emulated NIC (rtl8139, 100 Mbit/s) tells its own whatever the channel.
-const brutalLow = 1000
-
 // brutalWarnings are the enabled Hysteria2 services whose Brutal has no
-// ceiling, or the link's of below brutalLow (render.BrutalCeiling,
-// protocol review 2026-11, M1): the server sends each client as fast as
-// the client asks, and one may take the whole channel. link is asked only
-// when some service has no up_mbps of its own.
+// ceiling (render.BrutalCeiling, protocol review 2026-11, M1): the speed
+// of the node's link unknown, or too low to trust (an emulated NIC tells
+// its own whatever the channel). The server sends each client as fast as
+// the client asks. link is asked only when some service has no up_mbps of
+// its own.
 func brutalWarnings(services []store.Service, link func() (int, string)) []string {
 	var out []string
 	mbps, iface, asked := 0, "", false
@@ -479,15 +476,17 @@ func brutalWarnings(services []store.Service, link func() (int, string)) []strin
 			mbps, iface = link()
 			asked = true
 		}
-		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
-		switch up, from := render.BrutalCeiling(svc.Settings, mbps); {
-		case from == "":
-			out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling, the speed of the node's link unknown: it sends each client as fast as the client asks, and one may take the whole channel; %s",
-				svc.Kind, svc.Name, set))
-		case from == "link" && up < brutalLow:
-			out = append(out, fmt.Sprintf("%s %s: Brutal up to %d Mbit/s, the speed %s tells, which an emulated NIC tells whatever the channel; %s",
-				svc.Kind, svc.Name, up, iface, set))
+		if _, from := render.BrutalCeiling(svc.Settings, mbps); from != "" {
+			continue
 		}
+		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
+		if mbps > 0 {
+			out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling: %s tells %d Mbit/s, which an emulated NIC tells whatever the channel, so it is not taken; %s",
+				svc.Kind, svc.Name, iface, mbps, set))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling, the speed of the node's link unknown: it sends each client as fast as the client asks; %s",
+			svc.Kind, svc.Name, set))
 	}
 	return out
 }

@@ -534,7 +534,7 @@ x rayctl user limit alice off >/dev/null 2>&1 || fail "rayctl user limit off"
 invited="$(x rayctl device invite alice console -role admin)" || fail "rayctl device invite"
 invite="$(grep -o 'RCINV3:[A-Z2-7]*' <<<"$invited")" || fail "no rcinv3 invite"
 # An admin's invite has a PIN unless -pin=false (api-v1 §3).
-invite_pin="$(grep -oE '^PIN [0-9]{3} [0-9]{3}' <<<"$invited" | tr -dc '0-9')"
+invite_pin="$(grep -oE '^PIN [0-9]{3} [0-9]{3}' <<<"$invited" | tr -dc '0-9' || true)"
 [[ ${#invite_pin} == 6 ]] || fail "no PIN on the admin's invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.
