@@ -41,13 +41,14 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintln(w, "no relays")
 				return
 			}
-			fmt.Fprintln(w, "NAME\tADDRESS\tPROBE\tADDED")
+			fmt.Fprintln(w, "NAME\tADDRESS\tPROBE\tADDED\tUSERS")
 			for _, r := range r.Msg.Relays {
 				probe := "-"
 				if r.ProbePort != 0 {
 					probe = strconv.FormatUint(uint64(r.ProbePort), 10)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, r.Address, probe, time.Unix(r.CreatedAt, 0).UTC().Format(time.DateOnly))
+				users := relayUsersText(r)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.Address, probe, time.Unix(r.CreatedAt, 0).UTC().Format(time.DateOnly), users)
 			}
 			printRelayNames(w, r.Msg.Relays)
 		})
@@ -155,14 +156,40 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		fs := flag.NewFlagSet("relay set", flag.ContinueOnError)
 		ssh := fs.Uint("ssh-port", 0, "the relay host's SSH port (0 keeps it)")
 		admin := fs.String("admin", "", "addresses that reach the relay host's SSH without SPA (comma-separated; empty keeps them)")
-		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 || (*ssh == 0 && *admin == "") {
+		users := fs.String("users", "", `the users the relay is for, comma-separated, or "all" (empty keeps them)`)
+		renew := fs.Bool("renew-names", false, "make the relay's names again, with long labels (the ones before stop resolving)")
+		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 || (*ssh == 0 && *admin == "" && *users == "" && !*renew) {
 			return errUsage
 		}
-		if _, err := c.c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{
-			Name: fs.Arg(0), SshPort: uint32(*ssh), Admin: splitList(*admin)})); err != nil {
+		req := &nodev1.SetRelayAccessRequest{Name: fs.Arg(0), SshPort: uint32(*ssh), Admin: splitList(*admin), RenewNames: *renew}
+		if *users != "" {
+			req.SetUsers = true
+			if *users != "all" {
+				req.Users = splitList(*users)
+			}
+		}
+		if _, err := c.c.SetRelayAccess(ctx, connect.NewRequest(req)); err != nil {
 			return err
 		}
-		fmt.Printf("relay %s: the relay takes the new SSH access with its next snapshot (within a minute)\n", fs.Arg(0))
+		if req.SetUsers {
+			// A rayd before v0.36.0 takes the request and ignores the field:
+			// read the relay back rather than say what is not so.
+			if err := relayUsersTaken(ctx, c, req.Name, req.Users); err != nil {
+				return err
+			}
+		}
+		if *ssh != 0 || *admin != "" {
+			fmt.Printf("relay %s: the relay takes the new SSH access with its next snapshot (within a minute)\n", fs.Arg(0))
+		}
+		switch {
+		case *users == "all":
+			fmt.Printf("relay %s: for every user, from their next subscription\n", fs.Arg(0))
+		case *users != "":
+			fmt.Printf("relay %s: for %s only, from their next subscription; the relay knows no one else's devices from its next snapshot\n", fs.Arg(0), strings.Join(req.Users, ", "))
+		}
+		if *renew {
+			fmt.Printf("relay %s: new names with the next render; clients take them with their next subscription, the old ones stop resolving (rayctl dns without Cloudflare)\n", fs.Arg(0))
+		}
 		return nil
 	case "remove":
 		if len(args) != 1 {
@@ -175,6 +202,41 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		return nil
 	}
 	return errUsage
+}
+
+// relayUsersTaken checks that the node has the relay for exactly these
+// users now (none: every user).
+func relayUsersTaken(ctx context.Context, c *cli, relay string, users []string) error {
+	r, err := c.c.ListRelays(ctx, connect.NewRequest(&nodev1.ListRelaysRequest{}))
+	if err != nil {
+		return err
+	}
+	for _, got := range r.Msg.Relays {
+		if got.Name != relay {
+			continue
+		}
+		want := slices.Clone(users)
+		slices.Sort(want)
+		have := slices.Clone(got.Users)
+		slices.Sort(have)
+		if slices.Equal(slices.Compact(want), have) && !got.UsersNone {
+			return nil
+		}
+		return fmt.Errorf("relay %s: the node did not take -users (it is for %s): a rayd before v0.36.0 has no such setting; rayctl status shows its version",
+			relay, relayUsersText(got))
+	}
+	return fmt.Errorf("relay %s: not on the node after the change", relay)
+}
+
+// relayUsersText is whom a relay is for, as rayctl relay list puts it.
+func relayUsersText(r *nodev1.Relay) string {
+	switch {
+	case r.UsersNone:
+		return "none (its users are gone)"
+	case len(r.Users) > 0:
+		return strings.Join(r.Users, ",")
+	}
+	return "all"
 }
 
 // printRelayNames is a table of the relays' names (relay-names-v1 §3), a

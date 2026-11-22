@@ -187,6 +187,9 @@ func TestCarryRevocationsMore(t *testing.T) {
 	must(t, s.DeleteRelay(ctx, "relay1"))
 	must(t, s.ReplaceRelaySPA(ctx, "relay2", []byte(`{"new":1}`)))
 	must(t, s.SetRelayAccess(ctx, "relay2", 2222, []string{"203.0.113.9/32"}))
+	// Given to alice alone since (relay-v1 §4.1).
+	alice, _ := s.UserByName(ctx, "alice")
+	must(t, s.SetRelayUsers(ctx, "relay2", []int64{alice.ID}))
 	// A new bundle since: a new probe endpoint.
 	must(t, s.IssueRelay(ctx, "relay2", RelayIssue{SPA: []byte(`{"new":1}`), SSHPort: 2222, Admin: []string{"203.0.113.9/32"},
 		CertPin: "relay2-new", ProbePort: 31000, ProbePin: "probe-new"}))
@@ -210,7 +213,8 @@ func TestCarryRevocationsMore(t *testing.T) {
 	}
 	if rs, _ := s.ListRelays(ctx); len(rs) != 1 || rs[0].Name != "relay2" || string(rs[0].SPA) != `{"new":1}` ||
 		rs[0].SSHPort != 2222 || len(rs[0].Admin) != 1 || rs[0].Admin[0] != "203.0.113.9/32" ||
-		rs[0].CertPin != "relay2-new" || rs[0].ProbePort != 31000 || rs[0].ProbePin != "probe-new" {
+		rs[0].CertPin != "relay2-new" || rs[0].ProbePort != 31000 || rs[0].ProbePin != "probe-new" ||
+		len(rs[0].Users) != 1 || rs[0].Users[0] != alice.ID {
 		t.Errorf("relays %+v: removed one back, or the old SPA", rs)
 	}
 	for _, name := range []string{"dns", "mdns"} {

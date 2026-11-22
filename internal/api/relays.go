@@ -91,6 +91,9 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 		pb := relayPB(r)
 		pb.Ports = relayPorts(r, services, s.acme80(r.Name, cf, len(names[r.Name]) > 0))
 		pb.Names = names[r.Name]
+		if err := s.relayUsersPB(ctx, r, pb); err != nil {
+			return nil, toConnect(err)
+		}
 		resp.Relays = append(resp.Relays, pb)
 	}
 	return connect.NewResponse(resp), nil
@@ -271,6 +274,41 @@ func relayPB(r store.Relay) *nodev1.Relay {
 	return &nodev1.Relay{Name: r.Name, Address: r.Address.String(), CreatedAt: r.CreatedAt.Unix(), ProbePort: uint32(r.ProbePort)}
 }
 
+// relayUsersPB sets pb's users: the names of those the relay is for that
+// still exist, none for every user, users_none when they are all gone.
+func (s *Server) relayUsersPB(ctx context.Context, r store.Relay, pb *nodev1.Relay) error {
+	if r.Users == nil {
+		return nil
+	}
+	users, err := s.Store.ListUsers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
+		if r.For(u.ID) {
+			pb.Users = append(pb.Users, u.Name)
+		}
+	}
+	pb.UsersNone = len(pb.Users) == 0
+	return nil
+}
+
+// relayUserIDs are the IDs of the users named, nil for none (every user).
+func (s *Server) relayUserIDs(ctx context.Context, names []string) ([]int64, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	ids := make([]int64, 0, len(names))
+	for _, n := range names {
+		u, err := s.Store.UserByName(ctx, n)
+		if err != nil {
+			return nil, fmt.Errorf("relay users: %w", err)
+		}
+		ids = append(ids, u.ID)
+	}
+	return ids, nil
+}
+
 // IssueRelayBundle makes a relay its client certificate, its SPA parameters
 // if it has none, and the bundle its host installs (relay-v1 §3). The
 // certificate before stops working at once.
@@ -437,25 +475,55 @@ func (s *Server) SetRelayAccess(ctx context.Context, req *connect.Request[nodev1
 		if err != nil {
 			return err
 		}
-		sshPort, admin, err := relayAccess(relay, req.Msg.SshPort, req.Msg.Admin)
-		if err != nil {
-			return err
+		access := req.Msg.SshPort != 0 || len(req.Msg.Admin) > 0
+		if !access && !req.Msg.SetUsers && !req.Msg.RenewNames {
+			return fmt.Errorf("%w relay %s: nothing to set", store.ErrInvalid, relay.Name)
 		}
-		services, err := s.Store.ListServices(ctx)
-		if err != nil {
-			return err
+		var sshPort uint16
+		var admin []string
+		if access {
+			if sshPort, admin, err = relayAccess(relay, req.Msg.SshPort, req.Msg.Admin); err != nil {
+				return err
+			}
+			services, err := s.Store.ListServices(ctx)
+			if err != nil {
+				return err
+			}
+			if _, err := relayForwarded(services, sshPort); err != nil {
+				return err
+			}
+			if params, err := provision.RelayParams(ctx, s.Store, relay.Name); err == nil &&
+				int(sshPort) >= int(params.PortBase) && int(sshPort) < int(params.PortBase)+int(params.PortRange) {
+				return fmt.Errorf("%w ssh port %d: in the relay's SPA range", store.ErrInvalid, sshPort)
+			}
+			if sshPort == relay.ProbePort {
+				return fmt.Errorf("%w ssh port %d: the relay's probe endpoint", store.ErrInvalid, sshPort)
+			}
 		}
-		if _, err := relayForwarded(services, sshPort); err != nil {
-			return err
+		// Checked before anything is written: a name that does not exist
+		// changes nothing.
+		var ids []int64
+		if req.Msg.SetUsers {
+			if ids, err = s.relayUserIDs(ctx, req.Msg.Users); err != nil {
+				return err
+			}
 		}
-		if params, err := provision.RelayParams(ctx, s.Store, relay.Name); err == nil &&
-			int(sshPort) >= int(params.PortBase) && int(sshPort) < int(params.PortBase)+int(params.PortRange) {
-			return fmt.Errorf("%w ssh port %d: in the relay's SPA range", store.ErrInvalid, sshPort)
+		if access {
+			if err := s.Store.SetRelayAccess(ctx, relay.Name, sshPort, admin); err != nil {
+				return err
+			}
 		}
-		if sshPort == relay.ProbePort {
-			return fmt.Errorf("%w ssh port %d: the relay's probe endpoint", store.ErrInvalid, sshPort)
+		if req.Msg.SetUsers {
+			if err := s.Store.SetRelayUsers(ctx, relay.Name, ids); err != nil {
+				return err
+			}
 		}
-		return s.Store.SetRelayAccess(ctx, relay.Name, sshPort, admin)
+		if req.Msg.RenewNames {
+			// Made again at the next render, with labels of today's length
+			// (relay-names-v1 §3); the DNS sync drops the old records.
+			return provision.ForgetRelayNames(ctx, s.Store, relay.Name)
+		}
+		return nil
 	}()
 	if err := s.done(ctx, "relay.access", req.Msg.Name, err); err != nil {
 		return nil, err

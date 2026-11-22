@@ -1130,3 +1130,102 @@ func TestSubscriptionApp(t *testing.T) {
 		}
 	}
 }
+
+// relay-v1 §4.1: a relay is in a user's subscription only when one of the
+// user's profiles goes through it, and when the relay is for the user.
+func TestRelayAudience(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	build := func(user string) sub.Payload {
+		t.Helper()
+		env, err := srv.Build(ctx, user, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	relays := func(p sub.Payload) []string {
+		var ids []string
+		for _, r := range p.Relays {
+			ids = append(ids, r.ID)
+		}
+		return ids
+	}
+	via := func(p sub.Payload, svc int64) []string {
+		for _, pr := range p.Profiles {
+			if pr.Svc == uint16(svc) {
+				return pr.Via
+			}
+		}
+		return nil
+	}
+	reality, err := provision.CreateService(ctx, f.st, store.Service{Kind: "reality", Name: "reality", Enabled: true,
+		Settings: `{"target":"www.example.org:443"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	bob, err := f.st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := f.st.UserByName(ctx, "alice")
+	if err := f.st.SetUserServices(ctx, "alice", []int64{dns.ID, reality.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetUserServices(ctx, "bob", []int64{dns.ID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct{ name, addr string }{{"r1", "198.51.100.20"}, {"r2", "198.51.100.21"}} {
+		if _, err := f.st.CreateRelay(ctx, r.name, netip.MustParseAddr(r.addr)); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.st.SetRelayCertPin(ctx, r.name, "pin-"+r.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Bob's only profile is a DNS tunnel, which no relay takes: no relay for
+	// him. Alice's REALITY goes through both.
+	if got := relays(build("bob")); len(got) != 0 {
+		t.Errorf("bob, no profile through a relay: relays %v", got)
+	}
+	if got := relays(build("alice")); !slices.Equal(got, []string{"r1", "r2"}) {
+		t.Errorf("alice: relays %v", got)
+	}
+	// r2 for bob only: alice no longer sees it, nor goes through it.
+	if err := f.st.SetRelayUsers(ctx, "r2", []int64{bob.ID}); err != nil {
+		t.Fatal(err)
+	}
+	p := build("alice")
+	if got := relays(p); !slices.Equal(got, []string{"r1"}) {
+		t.Errorf("alice with r2 for bob: relays %v", got)
+	}
+	if got := via(p, reality.ID); !slices.Equal(got, []string{"r1"}) {
+		t.Errorf("alice's REALITY with r2 for bob: via %v", got)
+	}
+	// Both for alice: back to both.
+	if err := f.st.SetRelayUsers(ctx, "r2", []int64{bob.ID, alice.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := relays(build("alice")); !slices.Equal(got, []string{"r1", "r2"}) {
+		t.Errorf("alice with r2 for both: relays %v", got)
+	}
+	// Every user again.
+	if err := f.st.SetRelayUsers(ctx, "r2", nil); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := f.st.RelayByName(ctx, "r2"); r.Users != nil || !r.For(bob.ID) {
+		t.Errorf("r2 for every user: %+v", r.Users)
+	}
+	if err := f.st.SetRelayUsers(ctx, "r2", []int64{}); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("an empty list: %v", err)
+	}
+	if err := f.st.SetRelayUsers(ctx, "r2", []int64{99999}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("a user that does not exist: %v", err)
+	}
+}

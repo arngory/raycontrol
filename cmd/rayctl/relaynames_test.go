@@ -27,9 +27,9 @@ func TestRelayListNames(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	want := [][]string{
-		{"NAME", "ADDRESS", "PROBE", "ADDED"},
-		{"msk", "198.51.100.20", "-", "1970-01-01"},
-		{"spb", "198.51.100.21", "-", "1970-01-01"},
+		{"NAME", "ADDRESS", "PROBE", "ADDED", "USERS"},
+		{"msk", "198.51.100.20", "-", "1970-01-01", "all"},
+		{"spb", "198.51.100.21", "-", "1970-01-01", "all"},
 		nil,
 		{"RELAY", "SERVICE", "NAME", "READY"},
 		{"msk", "reality", "abc.example.com", "yes"},

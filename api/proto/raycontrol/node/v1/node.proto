@@ -521,6 +521,11 @@ message Relay {
   // forwards whose SNI is the node's, resolving to the relay's address.
   // Since v0.35.0; empty from a node before.
   repeated RelayName names = 6;
+  // The users it is for (relay-v1 §4.1), by name; empty: every user,
+  // unless users_none: those it was for are all gone, it is for no one.
+  // Since v0.36.0.
+  repeated string users = 7;
+  bool users_none = 8;
 }
 // RelayName is a relay's name for one service of the node.
 message RelayName {
@@ -586,6 +591,13 @@ message SetRelayAccessRequest {
   string name = 1;
   uint32 ssh_port = 2;       // 0 keeps it
   repeated string admin = 3; // empty keeps them
+  // The users the relay is for (relay-v1 §4.1), by name, with set_users:
+  // empty for every user. Without set_users they stay. Since v0.36.0.
+  bool set_users = 4;
+  repeated string users = 5;
+  // Make the relay's names again, with labels of the current length
+  // (relay-names-v1 §3): the ones before stop resolving. Since v0.36.0.
+  bool renew_names = 6;
 }
 message SetRelayAccessResponse {}
 

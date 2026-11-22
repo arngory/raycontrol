@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/store"
@@ -136,7 +138,7 @@ func relayNames(ctx context.Context, st *store.Store, domain string, write bool)
 				if !write || full {
 					continue
 				}
-				name, err = newZone(ctx, st, all, made...)
+				name, err = newName(ctx, st, all, RelayLabelLen, made...)
 				if errors.Is(err, store.ErrInvalid) {
 					// No label left: the pairs after this one wait, as
 					// the node's own name does.
@@ -225,4 +227,22 @@ func relayNameList(ctx context.Context, st *store.Store) (relays, names []string
 		}
 	}
 	return relays, names, err
+}
+
+// RelayNameWarnings are the relays with a name of a short label, made
+// before v0.36.0 (relay-names-v1 §3): a scan of the domain's 3-character
+// labels finds their addresses. One line a relay.
+func RelayNameWarnings(names []RelayName) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rn := range names {
+		label, _, _ := strings.Cut(rn.Name, ".")
+		if len(label) >= RelayLabelLen || seen[rn.Relay] {
+			continue
+		}
+		seen[rn.Relay] = true
+		out = append(out, fmt.Sprintf("relay %s: its names have labels of %d characters, which a scan of the domain finds (relay-names-v1 §3): rayctl relay set -renew-names %s makes long ones; clients take them with their next subscription (without Cloudflare its names are in the public CT logs anyway, and new ones would be too)",
+			rn.Relay, len(label), rn.Relay))
+	}
+	return out
 }
