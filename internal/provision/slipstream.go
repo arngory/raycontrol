@@ -11,11 +11,6 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// MaxSlipstreamZone is the longest zone of a slipstream service
-// (spec/slipstream-v1.md §3): a client's packets carry (240 - len(zone)) /
-// 1.6 bytes, 8 of them the dnsauth-v2 field, and a QUIC Initial needs 129.
-const MaxSlipstreamZone = 20
-
 // DNSTunnel reports whether a kind is a DNS tunnel: a zone delegated to the
 // node, answered by the front on UDP 53, its clients' queries tagged with a
 // device's key (dnsauth).
@@ -127,12 +122,14 @@ func slipstreamService(ctx context.Context, st *store.Store, all []store.Service
 		}
 		// The domain as stored: before v0.14 as typed (capitals, a final dot).
 		zone = canonicalZone(zone)
-		if len(zone) > MaxSlipstreamZone {
-			return fmt.Errorf("%w: a zone under the node's domain would be %d characters, slipstream takes at most %d (spec/slipstream-v1.md §3): give zone=<a shorter name delegated to the node>", store.ErrInvalid, len(zone), MaxSlipstreamZone)
+		if err := checkZoneLen(ctx, st, "slipstream", zone); err != nil {
+			return err
 		}
 		settings["zone"] = zone
-	} else if zs, isString := z.(string); !isString || !zoneName.MatchString(strings.TrimSuffix(zs, ".")) || len(canonicalZone(zs)) > MaxSlipstreamZone {
-		return fmt.Errorf("%w zone %v: a DNS name of two labels or more, at most %d characters (spec/slipstream-v1.md §3)", store.ErrInvalid, z, MaxSlipstreamZone)
+	} else if zs, isString := z.(string); !isString || !zoneName.MatchString(strings.TrimSuffix(zs, ".")) {
+		return fmt.Errorf("%w zone %v: a DNS name of two labels or more (spec/slipstream-v1.md §3)", store.ErrInvalid, z)
+	} else if err := checkZoneLen(ctx, st, "slipstream", canonicalZone(zs)); err != nil {
+		return err
 	} else if other := zoneConflict(canonicalZone(zs), all); other != "" {
 		return fmt.Errorf("%w zone %v: the same as, or nested with, the zone of %s", store.ErrInvalid, z, other)
 	} else if name, err := nodeNameClash(ctx, st, all, canonicalZone(zs)); err != nil {
