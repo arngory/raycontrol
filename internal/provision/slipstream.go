@@ -84,8 +84,8 @@ func ParseSlipstream(svc store.Service) (SlipstreamSettings, error) {
 	// typed before v0.14 (capitals, a final dot) still serves.
 	s.Zone = canonicalZone(s.Zone)
 	switch {
-	case !zoneName.MatchString(s.Zone) || len(s.Zone) > MaxSlipstreamZone:
-		return s, fmt.Errorf("zone %q: a DNS name of two labels or more, at most %d characters", s.Zone, MaxSlipstreamZone)
+	case !zoneName.MatchString(s.Zone) || len(s.Zone) > MaxSlipstreamZoneLong:
+		return s, fmt.Errorf("zone %q: a DNS name of two labels or more, at most %d characters", s.Zone, MaxSlipstreamZoneLong)
 	case !slipALPN.MatchString(s.ALPN):
 		return s, fmt.Errorf("quic_alpn %q: 8 to 12 of a-z and 0-9", s.ALPN)
 	case !slipSNI.MatchString(s.SNI):

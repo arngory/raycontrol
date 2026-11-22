@@ -105,11 +105,23 @@ func TestClientPolicyZoneLength(t *testing.T) {
 		t.Fatalf("a dnstt zone of 100 under niko 1.66.0: %v", err)
 	}
 	for _, min := range []string{"1.65.0", ""} {
-		if err := set(min); connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "d "+zone) {
+		if err := set(min); connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "d "+zone) || !strings.Contains(err.Error(), "minimum of niko 1.66.0") {
 			t.Errorf("minimum %q with the zone of 100: %v", min, err)
 		}
 	}
 	if err := set("1.70.0"); err != nil {
 		t.Errorf("a higher minimum: %v", err)
+	}
+	// A slipstream zone of 100 needs 1.67.0, and the refusal of a lower
+	// minimum names it.
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "slipstream", Name: "s",
+		SettingsJson: `{"zone":"s` + zone[1:] + `"}`})); err != nil {
+		t.Fatalf("a slipstream zone of 100 under niko 1.70.0: %v", err)
+	}
+	if err := set("1.66.0"); connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "minimum of niko 1.67.0") {
+		t.Errorf("minimum 1.66.0 with the slipstream zone of 100: %v", err)
+	}
+	if err := set("1.67.0"); err != nil {
+		t.Errorf("minimum 1.67.0: %v", err)
 	}
 }

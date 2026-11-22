@@ -373,8 +373,8 @@ func TestDNSProblems(t *testing.T) {
 		t.Fatalf("good slipstream line: %v", p)
 	}
 	for _, c := range [][2]string{
-		{"niko-dns", "slipstream;;s.example.com;8"},                  // not the line's service
-		{"niko-dns", "slipstream;;abcdefghijklmnopqr.example.com;7"}, // 30 characters: past Niko 1.66's 29
+		{"niko-dns", "slipstream;;s.example.com;8"}, // not the line's service
+		{"niko-dns", "slipstream;;" + strings.Repeat("a", 50) + "." + strings.Repeat("b", 50) + "." + strings.Repeat("c", 21) + ".example.com;7"}, // 135 characters: past Niko 1.67's 134
 		{"niko-dns", "slipstream;x;s.example.com;7"},
 		{"niko-dnsauth", ""},
 		{"niko-slip", "v1;" + pin + ";picoquic_sample;quiet.dev"},
@@ -571,9 +571,9 @@ func dnsProblems(kind string, q url.Values) []string {
 		return append(out, "niko-dns "+q.Get("niko-dns"))
 	}
 	if kind == "slipstream" {
-		// slipstream-v1 §4: the zone (at most 29 characters, Niko 1.66) and the
-		// line's service; the pin, ALPN and name; signed always.
-		if len(f[2]) > provision.MaxSlipstreamZone || f[3] != q.Get("niko-svc") || f[1] != "" {
+		// slipstream-v1 §4: the zone (at most 134 characters, Niko 1.67) and
+		// the line's service; the pin, ALPN and name; signed always.
+		if len(f[2]) > provision.MaxSlipstreamZoneLong || f[3] != q.Get("niko-svc") || f[1] != "" {
 			out = append(out, "niko-dns "+q.Get("niko-dns"))
 		}
 		if q.Get("niko-dnsauth") != "v1" {

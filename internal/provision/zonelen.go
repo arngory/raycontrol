@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/clientver"
@@ -25,11 +26,16 @@ const (
 	MaxDNSTTZone     = 72
 	MaxDNSTTZoneLong = 120
 
-	// slipstream: the server's picoquic drops an Initial under 129 bytes;
+	// slipstream: the server's picoquic before server-v0.3.0 drops an Initial
+	// under 129 bytes;
 	// Niko before 1.66 sizes its packets (240-L)/1.6-8 (129 at 20), since
 	// 1.66 as its encoder fits them (129 at 29).
 	MaxSlipstreamZoneShort = 20
 	MaxSlipstreamZone      = 29
+	// slipstream from server-v0.3.0 and Niko 1.67 (picoquic of
+	// arngory/picoquic, Initials from 64 bytes): the client takes 134 with
+	// dnsauth-v2, which the node's lines always ask.
+	MaxSlipstreamZoneLong = 134
 
 	// masterdns: the client's MIN_UPLOAD_MTU, 38 bytes, at 116; past
 	// WarnMasterDNSZone a query carries under half of a short zone's.
@@ -41,6 +47,13 @@ const (
 // of dnstt and slipstream.
 const LongZoneClient = "1.66.0"
 
+// SlipstreamLongZoneClient is the Niko release whose slipstream client is
+// on the picoquic of server-v0.3.0 and takes MaxSlipstreamZoneLong.
+const SlipstreamLongZoneClient = "1.67.0"
+
+// zoneClients are the Niko releases that lengthen a zone, oldest first.
+var zoneClients = []string{LongZoneClient, SlipstreamLongZoneClient}
+
 // LongZoneClients reports whether the node's client policy keeps Niko
 // older than LongZoneClient out now: a minimum for niko of LongZoneClient
 // or later, in force. Clients that name no version are not asked to be
@@ -48,6 +61,12 @@ const LongZoneClient = "1.66.0"
 // node's profiles when refused (rayctl client min -yes), and such a client
 // loses only the tunnels with a long zone.
 func LongZoneClients(p clientver.Policy, now time.Time) bool {
+	return clientsFrom(p, now, LongZoneClient)
+}
+
+// clientsFrom reports whether the policy keeps Niko older than version out
+// now (LongZoneClients for any of zoneClients).
+func clientsFrom(p clientver.Policy, now time.Time, version string) bool {
 	if !p.Active(now) {
 		return false
 	}
@@ -56,8 +75,28 @@ func LongZoneClients(p clientver.Policy, now time.Time) bool {
 		return false
 	}
 	mv, err := clientver.ParseVersion(min)
-	want, _ := clientver.ParseVersion(LongZoneClient)
+	want, _ := clientver.ParseVersion(version)
 	return err == nil && clientver.Compare(mv, want) >= 0
+}
+
+// ZoneClientOlder reports whether Niko release a is older than b (both of
+// zoneClients).
+func ZoneClientOlder(a, b string) bool {
+	return slices.Index(zoneClients, a) < slices.Index(zoneClients, b)
+}
+
+// ZoneClient is the oldest Niko release whose clients take a zone of n
+// characters for a kind ("" when none does, or every client does).
+func ZoneClient(kind string, n int) string {
+	if n <= ZoneMax(kind, clientver.Policy{}, time.Now()) {
+		return ""
+	}
+	for _, v := range zoneClients {
+		if n <= ZoneMax(kind, clientver.Policy{Min: map[string]string{"niko": v}}, time.Now()) {
+			return v
+		}
+	}
+	return ""
 }
 
 // ZoneMax is the longest zone of a kind under a client policy at now; 0
@@ -71,7 +110,10 @@ func ZoneMax(kind string, p clientver.Policy, now time.Time) int {
 		}
 		return MaxDNSTTZone
 	case "slipstream":
-		if long {
+		switch {
+		case clientsFrom(p, now, SlipstreamLongZoneClient):
+			return MaxSlipstreamZoneLong
+		case long:
 			return MaxSlipstreamZone
 		}
 		return MaxSlipstreamZoneShort
@@ -81,14 +123,18 @@ func ZoneMax(kind string, p clientver.Policy, now time.Time) int {
 	return 0
 }
 
-// longPolicy is a policy that keeps Niko older than LongZoneClient out.
-var longPolicy = clientver.Policy{Min: map[string]string{"niko": LongZoneClient}}
-
-// zoneLenError says why a zone is too long for a kind, and what would do.
+// zoneLenError says why a zone is too long for a kind, and what would do:
+// the oldest Niko whose clients take it, else the longest any take.
 func zoneLenError(kind, zone string, max int) error {
 	more := ""
-	if longMax := ZoneMax(kind, longPolicy, time.Now()); longMax > max {
-		more = fmt.Sprintf("; with clients from Niko %s only (rayctl client min niko %s), %d", LongZoneClient, LongZoneClient, longMax)
+	for _, v := range zoneClients {
+		m := ZoneMax(kind, clientver.Policy{Min: map[string]string{"niko": v}}, time.Now())
+		if m > max {
+			more = fmt.Sprintf("; with clients from Niko %s only (rayctl client min niko %s), %d", v, v, m)
+			if len(zone) <= m {
+				break
+			}
+		}
 	}
 	return fmt.Errorf("%w zone %s: %d characters, %s takes at most %d%s (docs/spec/dns-zone-length-v1.md): give zone=<a shorter name delegated to the node>; %d characters or fewer works for every tunnel and client",
 		store.ErrInvalid, zone, len(zone), kind, max, more, ZoneLenBase)

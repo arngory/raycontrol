@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/clientver"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodepkg "github.com/arngory/raycontrol/internal/node"
@@ -57,8 +58,16 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	}
 	// One connection a device: a second client of the phone waits, the
 	// laptop's does not (server-v0.2.0, the device named by the front).
+	// The longest zone the node gives, with clients from Niko 1.67.0
+	// (server-v0.3.0, docs/spec/dns-zone-length-v1.md): the smallest
+	// packets the client and the front's names must still carry.
+	if _, err := nodepkg.SetClientPolicy(ctx, st, clientver.Policy{Min: map[string]string{"niko": provision.SlipstreamLongZoneClient}}); err != nil {
+		t.Fatal(err)
+	}
+	zone := strings.Repeat("a", 50) + "." + strings.Repeat("b", 50) + "."
+	zone += strings.Repeat("c", provision.MaxSlipstreamZoneLong-len(zone)-len(".example.com")) + ".example.com"
 	slip, err := provision.CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true,
-		Settings: `{"device_connections":1}`})
+		Settings: `{"device_connections":1,"zone":"` + zone + `"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +207,7 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	q := link.Query()
 	dnsf := strings.Split(q.Get("niko-dns"), ";")
 	slipf := strings.Split(q.Get("niko-slip"), ";")
-	if len(dnsf) != 4 || dnsf[0] != "slipstream" || len(slipf) != 4 || slipf[0] != "v1" || q.Get("niko-dnsauth") != "v1" {
+	if len(dnsf) != 4 || dnsf[0] != "slipstream" || dnsf[2] != zone || len(slipf) != 4 || slipf[0] != "v1" || q.Get("niko-dnsauth") != "v1" {
 		t.Fatalf("link %s", profiles[0].Link)
 	}
 	// K as a client makes it: from the link's niko-node and niko-svc.
