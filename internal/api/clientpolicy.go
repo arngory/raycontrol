@@ -12,6 +12,8 @@ import (
 	"github.com/arngory/raycontrol/internal/clientver"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // ClientWindow is how far back GetClientPolicy counts devices by the client
@@ -40,7 +42,12 @@ func (s *Server) GetClientPolicy(ctx context.Context, _ *connect.Request[nodev1.
 // it goes out with the next subscription a client fetches.
 func (s *Server) SetClientPolicy(ctx context.Context, req *connect.Request[nodev1.SetClientPolicyRequest]) (*connect.Response[nodev1.SetClientPolicyResponse], error) {
 	in := req.Msg.GetPolicy()
-	p, err := node.SetClientPolicy(ctx, s.Store, clientver.Policy{Min: in.GetMin(), From: in.GetFrom(), RefuseUnknown: in.GetRefuseUnknown()})
+	want := clientver.Policy{Min: in.GetMin(), From: in.GetFrom(), RefuseUnknown: in.GetRefuseUnknown()}
+	var p clientver.Policy
+	err := s.zonesFit(ctx, want)
+	if err == nil {
+		p, err = node.SetClientPolicy(ctx, s.Store, want)
+	}
 	// The audit names only a policy as checked: an invalid one may hold
 	// anything the caller sent.
 	target := "none"
@@ -68,4 +75,24 @@ func minList(min map[string]string) string {
 
 func policyMsg(p clientver.Policy) *nodev1.ClientPolicy {
 	return &nodev1.ClientPolicy{Min: p.Min, From: p.From, RefuseUnknown: p.RefuseUnknown}
+}
+
+// zonesFit refuses a policy under which a DNS tunnel's zone would be too
+// long (docs/spec/dns-zone-length-v1.md): one taken because older clients
+// were kept out, which this policy would let back in.
+func (s *Server) zonesFit(ctx context.Context, p clientver.Policy) error {
+	if _, err := p.Check(); err != nil {
+		return nil // node.SetClientPolicy says why
+	}
+	all, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	// As it holds now: one that starts later lets older clients in until
+	// then.
+	if long := provision.ZonesTooLong(all, p, time.Now()); len(long) > 0 {
+		return fmt.Errorf("%w: under this client minimum these zones are too long for their clients: %s; keep a minimum of niko %s, or give the services shorter zones first",
+			store.ErrInvalid, strings.Join(long, ", "), provision.LongZoneClient)
+	}
+	return nil
 }

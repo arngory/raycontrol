@@ -76,3 +76,40 @@ func TestClientPolicy(t *testing.T) {
 		t.Fatalf("taken away: %+v %v", r, err)
 	}
 }
+
+// docs/spec/dns-zone-length-v1.md: a dnstt zone of 100 characters, taken
+// under a minimum of Niko 1.66.0, keeps a lower minimum out, and none; the
+// status warns of a zone too long once the minimum is gone by other ways.
+func TestClientPolicyZoneLength(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	zone := strings.Repeat("a", 60) + "." + strings.Repeat("b", 27) + ".example.net" // 100
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "d",
+		SettingsJson: `{"zone":"` + zone + `"}`})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a dnstt zone of 100 with no minimum: %v", err)
+	}
+	set := func(min string) error {
+		p := &nodev1.ClientPolicy{}
+		if min != "" {
+			p.Min = map[string]string{"niko": min}
+		}
+		_, err := c.SetClientPolicy(ctx, connect.NewRequest(&nodev1.SetClientPolicyRequest{Policy: p}))
+		return err
+	}
+	if err := set("1.66.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "d",
+		SettingsJson: `{"zone":"` + zone + `"}`})); err != nil {
+		t.Fatalf("a dnstt zone of 100 under niko 1.66.0: %v", err)
+	}
+	for _, min := range []string{"1.65.0", ""} {
+		if err := set(min); connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "d "+zone) {
+			t.Errorf("minimum %q with the zone of 100: %v", min, err)
+		}
+	}
+	if err := set("1.70.0"); err != nil {
+		t.Errorf("a higher minimum: %v", err)
+	}
+}
