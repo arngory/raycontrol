@@ -43,4 +43,7 @@ func TestLANRelayPin(t *testing.T) {
 	if n[0] == 0 && n[1] < 16 {
 		t.Fatalf("niko-server %s is older than v0.16.0, but render writes lan_relay_mbps and LAN groups", tag)
 	}
+	if n[0] == 0 && n[1] < 19 {
+		t.Fatalf("niko-server %s is older than v0.19.0, but render writes the Yggdrasil backend's pq", tag)
+	}
 }

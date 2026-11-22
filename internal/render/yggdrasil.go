@@ -220,6 +220,11 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 	options := map[string]any{
 		"private_key_file": p.Credential(s.Name, YggdrasilNodeKey),
 		"exit_ports":       []int{st.ExitPort},
+		// PQ sessions (niko-server v0.19.0): answer unless set, always
+		// written, off too. niko-server before v0.19.0 refuses the option,
+		// and with it the backend: TestLANRelayPin keeps the pin at
+		// v0.19.0 or later.
+		"pq": provision.YggdrasilPQ(s.Service),
 	}
 	if len(st.Peers) > 0 {
 		options["peers"] = st.Peers
