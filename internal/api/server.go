@@ -455,6 +455,11 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	if !integration {
 		resp.Warnings = brutalWarnings(services, render.HostLink)
+		// A policy that does not read leaves the zones unchecked, not the
+		// status unanswered.
+		if policy, err := node.ClientPolicy(ctx, s.Store); err == nil {
+			resp.Warnings = append(resp.Warnings, provision.ZoneWarnings(services, policy, time.Now())...)
+		}
 	}
 	return connect.NewResponse(resp), nil
 }

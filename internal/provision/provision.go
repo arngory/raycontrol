@@ -375,6 +375,12 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			// As the front and the delegation compare it.
 			settings["zone"] = canonicalZone(zs)
 		}
+		// Whether made up under the node's domain or given (a long
+		// domain makes a long zone): past the tunnel's limit its clients
+		// would not start (docs/spec/dns-zone-length-v1.md).
+		if err := checkZoneLen(ctx, st, svc.Kind, settings["zone"].(string)); err != nil {
+			return svc, err
+		}
 		if raw, ok := settings["spare_zones"]; ok {
 			// As service set takes them: a number, or the zones.
 			var value string
@@ -396,7 +402,7 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				return svc, fmt.Errorf("%w spare_zones: a number or a list of zones", store.ErrInvalid)
 			}
 			main, _ := json.Marshal(map[string]any{"zone": settings["zone"]})
-			spares, err := spareZones(ctx, st, store.Service{Name: svc.Name, Settings: string(main)}, all, value)
+			spares, err := spareZones(ctx, st, store.Service{Name: svc.Name, Kind: svc.Kind, Settings: string(main)}, all, value)
 			if err != nil {
 				return svc, err
 			}
@@ -878,6 +884,10 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		if i < 0 {
 			return svc, fmt.Errorf("%w zone %s: not a spare zone of %s (spare zones: %s); clients must have a zone before it becomes the main one",
 				store.ErrInvalid, value, svc.Name, strings.Join(spares, ", "))
+		}
+		// Taken as a spare under the policy of then: checked again.
+		if err := checkZoneLen(ctx, st, svc.Kind, z); err != nil {
+			return svc, err
 		}
 		v = z
 		also["spare_zones"] = 0
@@ -1683,6 +1693,9 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			if err != nil {
 				return nil, err
 			}
+			if err := checkZoneLen(ctx, st, svc.Kind, canonicalZone(z)); err != nil {
+				return nil, err
+			}
 			out = append(out, z)
 		}
 		return out, nil
@@ -1703,6 +1716,9 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			return nil, err
 		} else if name != "" {
 			return nil, fmt.Errorf("%w spare zone %s: it would take %s", store.ErrInvalid, z, name)
+		}
+		if err := checkZoneLen(ctx, st, svc.Kind, z); err != nil {
+			return nil, err
 		}
 		out = append(out, z)
 	}
