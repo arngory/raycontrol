@@ -261,12 +261,24 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `DELETE FROM users AS u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx))
+		var id int64
+		err = tx.QueryRowContext(ctx, `SELECT u.id FROM users u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		}
 		if err != nil {
 			return err
 		}
-		if n, err := res.RowsAffected(); err != nil || n == 0 {
-			return cmp.Or(err, fmt.Errorf("user %q: %w", name, ErrNotFound))
+		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
+			return err
+		}
+		// Its ID leaves the relays it was given (relay-v1 §4.1): SQLite gives
+		// a deleted row's ID to the next user, who would get those relays.
+		// A relay left with none is for no one, not for every user.
+		if _, err := tx.ExecContext(ctx, `UPDATE relays SET users_json =
+			(SELECT json_group_array(value) FROM json_each(relays.users_json) WHERE value != ?)
+			WHERE users_json IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(relays.users_json) WHERE value = ?)`, id, id); err != nil {
+			return err
 		}
 		return checkCounting(ctx, tx, limited)
 	})

@@ -126,8 +126,28 @@ func TestRelaySnapshot(t *testing.T) {
 	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SetUsers: true, Users: []string{"bob"}})); err != nil {
 		t.Fatal(err)
 	}
-	if got := devices(); !slices.Equal(got, []string{bobDev.ID}) {
-		t.Fatalf("relay for bob: devices %v", got)
+	// Alice keeps the relay host's SSH alone (relay-v1 §3.1), no service of
+	// the exit's and no probe; bob keeps REALITY.
+	snapBob, err := per.RelaySnapshot(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range snapBob.Devices {
+		switch d.Id {
+		case dev.ID:
+			if !slices.Equal(d.Allowed, []uint32{uint32(ssh.ID)}) {
+				t.Fatalf("relay for bob: alice's device allowed %v, want SSH %d alone", d.Allowed, ssh.ID)
+			}
+		case bobDev.ID:
+			if !slices.Contains(d.Allowed, uint32(reality.ID)) {
+				t.Fatalf("relay for bob: bob's device allowed %v", d.Allowed)
+			}
+		default:
+			t.Fatalf("relay for bob: device %s", d.Id)
+		}
+	}
+	if len(snapBob.Devices) != 2 {
+		t.Fatalf("relay for bob: devices %v", snapBob.Devices)
 	}
 	if known, err := per.RelayKnows(ctx, "r1", dev.ID); err != nil || known {
 		t.Fatalf("relay for bob knows alice's device: %v %v", known, err)

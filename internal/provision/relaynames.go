@@ -241,7 +241,7 @@ func RelayNameWarnings(names []RelayName) []string {
 			continue
 		}
 		seen[rn.Relay] = true
-		out = append(out, fmt.Sprintf("relay %s: its names have labels of %d characters, which a scan of the domain finds (relay-names-v1 §3): rayctl relay set -renew-names %s makes long ones; clients take them with their next subscription",
+		out = append(out, fmt.Sprintf("relay %s: its names have labels of %d characters, which a scan of the domain finds (relay-names-v1 §3): rayctl relay set -renew-names %s makes long ones; clients take them with their next subscription (without Cloudflare its names are in the public CT logs anyway, and new ones would be too)",
 			rn.Relay, len(label), rn.Relay))
 	}
 	return out

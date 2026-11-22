@@ -297,20 +297,29 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	if err != nil {
 		return nil, err
 	}
-	for _, d := range devices {
-		if !forUser(d.ID) {
-			continue // not of a user the relay is for (relay-v1 §4.1): its K_relay stays here
+	// The relay host's own scopes (its SSH, relay-v1 §3.1): a device allowed
+	// the exit's SSH keeps them on a relay that is for other users, or the
+	// admin would reach the relay host from its admin addresses alone.
+	local := map[uint32]bool{}
+	for _, svc := range snap.Services {
+		if svc.Local && svc.Id != uint32(provision.RelayProbeSvc) {
+			local[svc.Id] = true
 		}
+	}
+	for _, d := range devices {
+		// Not of a user the relay is for (relay-v1 §4.1): only the relay
+		// host's own scopes, no service of the exit's, no probe.
+		mine := forUser(d.ID)
 		var allowed []uint32
 		for _, id := range d.Allowed {
-			if scoped[id] {
+			if scoped[id] && (mine || local[uint32(id)]) {
 				allowed = append(allowed, uint32(id))
 			}
 		}
 		if len(allowed) == 0 {
 			continue
 		}
-		if probe {
+		if probe && mine {
 			allowed = append(allowed, uint32(provision.RelayProbeSvc))
 		}
 		k := spa.RelayKey(d.Key, p.Params.NodeID, params.NodeID, relay.Name)
