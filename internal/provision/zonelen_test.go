@@ -27,7 +27,7 @@ func zoneOf(n int) string {
 }
 
 func TestZoneOf(t *testing.T) {
-	for _, n := range []int{20, 21, 29, 30, 72, 73, 116, 117, 120, 121} {
+	for _, n := range []int{20, 21, 29, 30, 72, 73, 116, 117, 120, 121, 134, 135} {
 		if z := zoneOf(n); len(z) != n || !zoneName.MatchString(z) {
 			t.Errorf("%d: %q (%d)", n, z, len(z))
 		}
@@ -46,7 +46,10 @@ func TestZoneMax(t *testing.T) {
 		{clientver.Policy{}, 72, 20, 116, 0},
 		{clientver.Policy{Min: map[string]string{"niko": "1.65.9"}}, 72, 20, 116, 0},
 		{long, 120, 29, 116, 0},
-		{clientver.Policy{Min: map[string]string{"niko": "1.70.0"}}, 120, 29, 116, 0},
+		{clientver.Policy{Min: map[string]string{"niko": "1.66.9"}}, 120, 29, 116, 0},
+		{clientver.Policy{Min: map[string]string{"niko": "1.67.0"}}, 120, 134, 116, 0},
+		{clientver.Policy{Min: map[string]string{"niko": "1.70.0"}}, 120, 134, 116, 0},
+		{clientver.Policy{Min: map[string]string{"niko": "1.67.0"}, From: now.Add(time.Hour).Unix()}, 72, 20, 116, 0},
 		{clientver.Policy{Min: map[string]string{"niko": "1.66.0-pre.1"}}, 72, 20, 116, 0}, // a pre-release comes before
 		{clientver.Policy{Min: map[string]string{"other": "9.0.0"}}, 72, 20, 116, 0},
 		{clientver.Policy{Min: map[string]string{"niko": "1.66.0"}, From: now.Add(time.Hour).Unix()}, 72, 20, 116, 0}, // not yet
@@ -129,6 +132,74 @@ func TestZoneLengthRefused(t *testing.T) {
 	}
 	if w := ZoneWarnings(all, clientver.Policy{}, time.Now()); len(w) != 4 { // the three, and masterdns 116 past 100
 		t.Errorf("warnings: %v", w)
+	}
+}
+
+// slipstream from Niko 1.67.0 (server-v0.3.0's picoquic): up to 134; the
+// refusal names the oldest Niko that takes the zone, and a minimum that
+// would let older clients back in is refused naming 1.67.0.
+func TestZoneLengthSlipstreamLong(t *testing.T) {
+	ctx, st := slipStore(t, "example.com")
+	create := func(name string, length int) error {
+		b, _ := json.Marshal(map[string]any{"zone": zoneOf(length)})
+		_, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: name, Enabled: true, Settings: string(b)})
+		return err
+	}
+	if err := create("s1", 25); err == nil || !strings.Contains(err.Error(), "Niko 1.66.0 only") {
+		t.Errorf("25 with no minimum: %v, want 1.66.0 named", err)
+	}
+	if err := create("s2", 100); err == nil || !strings.Contains(err.Error(), "Niko 1.67.0 only") || !strings.Contains(err.Error(), ", 134") {
+		t.Errorf("100 with no minimum: %v, want 1.67.0 and 134 named", err)
+	}
+	if _, err := node.SetClientPolicy(ctx, st, clientver.Policy{Min: map[string]string{"niko": "1.66.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := create("s3", 30); err == nil || !strings.Contains(err.Error(), "Niko 1.67.0 only") {
+		t.Errorf("30 under 1.66.0: %v, want 1.67.0 named", err)
+	}
+	if _, err := node.SetClientPolicy(ctx, st, clientver.Policy{Min: map[string]string{"niko": "1.67.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := create("s4", 134); err != nil {
+		t.Errorf("134 under 1.67.0: %v", err)
+	}
+	if err := create("s5", 135); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("135 under 1.67.0: %v, want refused", err)
+	}
+	svc, err := st.ServiceByName(ctx, "s4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ss, err := ParseSlipstream(svc); err != nil || len(ss.Zone) != 134 {
+		t.Errorf("the zone of 134 read back: %q %v", ss.Zone, err)
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		min  string
+		long int
+	}{{"", 1}, {"1.66.0", 1}, {"1.67.0", 0}} {
+		p := clientver.Policy{}
+		if c.min != "" {
+			p.Min = map[string]string{"niko": c.min}
+		}
+		if got := ZonesTooLong(all, p, time.Now()); len(got) != c.long {
+			t.Errorf("too long under %q: %v", c.min, got)
+		}
+	}
+	if v := ZoneClient("slipstream", 134); v != SlipstreamLongZoneClient {
+		t.Errorf("ZoneClient 134: %q", v)
+	}
+	if v := ZoneClient("slipstream", 29); v != LongZoneClient {
+		t.Errorf("ZoneClient 29: %q", v)
+	}
+	if v := ZoneClient("slipstream", 20); v != "" {
+		t.Errorf("ZoneClient 20: %q", v)
+	}
+	if v := ZoneClient("dnstt", 120); v != LongZoneClient {
+		t.Errorf("ZoneClient dnstt 120: %q", v)
 	}
 }
 

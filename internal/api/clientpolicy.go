@@ -92,7 +92,20 @@ func (s *Server) zonesFit(ctx context.Context, p clientver.Policy) error {
 	// then.
 	if long := provision.ZonesTooLong(all, p, time.Now()); len(long) > 0 {
 		return fmt.Errorf("%w: under this client minimum these zones are too long for their clients: %s; keep a minimum of niko %s, or give the services shorter zones first",
-			store.ErrInvalid, strings.Join(long, ", "), provision.LongZoneClient)
+			store.ErrInvalid, strings.Join(long, ", "), zonesClient(all))
 	}
 	return nil
+}
+
+// zonesClient is the oldest Niko whose clients take every zone of all.
+func zonesClient(all []store.Service) string {
+	need := provision.LongZoneClient
+	for _, svc := range all {
+		for _, z := range provision.Zones(svc) {
+			if v := provision.ZoneClient(svc.Kind, len(strings.TrimSuffix(z, "."))); v != "" && provision.ZoneClientOlder(need, v) {
+				need = v
+			}
+		}
+	}
+	return need
 }
