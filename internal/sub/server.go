@@ -431,7 +431,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 			}
 		}
 	}
-	if err := s.addRelays(ctx, &p, m); err != nil {
+	if err := s.addRelays(ctx, &p, m, u.ID); err != nil {
 		return Envelope{}, err
 	}
 	// The links through the relays by their names (relay-names-v1 §8),
@@ -485,17 +485,58 @@ func (s *Server) FromRelay(ctx context.Context, addr netip.Addr) bool {
 	return slices.ContainsFunc(relays, func(r store.Relay) bool { return r.Address == addr })
 }
 
-// addRelays lists the relays in front of the node and marks the profiles
-// they forward (relay-v1 §4). A relay is listed once its bundle is issued:
-// before that its host forwards nothing.
-func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) error {
+// addRelays lists the relays in front of the node that are for the user
+// (relay-v1 §4.1) and marks the profiles they forward (§4): a relay is
+// listed once its bundle is issued (before that its host forwards
+// nothing), and only when one of the user's profiles goes through it. A
+// relay the user has no way through is no business of theirs: each
+// address in a subscription is one more for a censor with an account.
+func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model, user int64) error {
 	relays, err := s.Store.ListRelays(ctx)
 	if err != nil {
 		return err
 	}
-	var listed []store.Relay
+	var issued []store.Relay
 	for _, r := range relays {
-		if r.CertPin == "" {
+		if r.CertPin != "" && r.For(user) {
+			issued = append(issued, r)
+		}
+	}
+	if len(issued) == 0 {
+		return nil
+	}
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	byID := map[uint16]store.Service{}
+	for _, svc := range services {
+		byID[uint16(svc.ID)] = svc
+	}
+	ssh := provision.SSHPorts(services)
+	// A relay forwards what its snapshot says (provision.RelayPorts).
+	forwards := func(r store.Relay, svc uint16) bool {
+		ports, err := provision.RelayPorts(r, byID[svc], ssh)
+		return err == nil && len(ports) > 0
+	}
+	used := map[string]bool{}
+	for i := range p.Profiles {
+		for _, svc := range m.Services {
+			if uint16(svc.ID) != p.Profiles[i].Svc || !RelayKinds(svc.Kind) || svc.Public() {
+				continue
+			}
+			var via []string
+			for _, r := range issued {
+				if forwards(r, p.Profiles[i].Svc) {
+					via = append(via, r.Name)
+					used[r.Name] = true
+				}
+			}
+			p.Profiles[i].Via = via
+		}
+	}
+	for _, r := range issued {
+		if !used[r.Name] {
 			continue
 		}
 		params, err := provision.RelayParams(ctx, s.Store, r.Name)
@@ -515,38 +556,6 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 				Report: s.Probe != nil && s.Probe.Report != nil}
 		}
 		p.Relays = append(p.Relays, h)
-		listed = append(listed, r)
-	}
-	if len(listed) == 0 {
-		return nil
-	}
-	services, err := s.Store.ListServices(ctx)
-	if err != nil {
-		return err
-	}
-	byID := map[uint16]store.Service{}
-	for _, svc := range services {
-		byID[uint16(svc.ID)] = svc
-	}
-	ssh := provision.SSHPorts(services)
-	// A relay forwards what its snapshot says (provision.RelayPorts).
-	forwards := func(r store.Relay, svc uint16) bool {
-		ports, err := provision.RelayPorts(r, byID[svc], ssh)
-		return err == nil && len(ports) > 0
-	}
-	for i := range p.Profiles {
-		for _, svc := range m.Services {
-			if uint16(svc.ID) != p.Profiles[i].Svc || !RelayKinds(svc.Kind) || svc.Public() {
-				continue
-			}
-			var via []string
-			for _, r := range listed {
-				if forwards(r, p.Profiles[i].Svc) {
-					via = append(via, r.Name)
-				}
-			}
-			p.Profiles[i].Via = via
-		}
 	}
 	return nil
 }

@@ -97,6 +97,57 @@ func TestRelaySnapshot(t *testing.T) {
 		len(snap.AdminPorts) != 1 || snap.AdminPorts[0].Port != 22 {
 		t.Fatalf("relay snapshot %v", snap)
 	}
+
+	// relay-v1 §4.1: a relay for bob only knows none of alice's devices,
+	// and takes no report for one; for alice again, it knows hers.
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "bob", Services: []string{"reality"}})); err != nil {
+		t.Fatal(err)
+	}
+	bobDev, _, err := srv.Store.CreateDevice(ctx, "bob", "laptop", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devices := func() []string {
+		t.Helper()
+		snap, err := per.RelaySnapshot(ctx, "r1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, d := range snap.Devices {
+			ids = append(ids, d.Id)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	if got := devices(); len(got) != 2 {
+		t.Fatalf("relay for every user: devices %v", got)
+	}
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SetUsers: true, Users: []string{"bob"}})); err != nil {
+		t.Fatal(err)
+	}
+	if got := devices(); !slices.Equal(got, []string{bobDev.ID}) {
+		t.Fatalf("relay for bob: devices %v", got)
+	}
+	if known, err := per.RelayKnows(ctx, "r1", dev.ID); err != nil || known {
+		t.Fatalf("relay for bob knows alice's device: %v %v", known, err)
+	}
+	if known, err := per.RelayKnows(ctx, "r1", bobDev.ID); err != nil || !known {
+		t.Fatalf("relay for bob does not know his: %v %v", known, err)
+	}
+	list, err := c.ListRelays(ctx, connect.NewRequest(&nodev1.ListRelaysRequest{}))
+	if err != nil || len(list.Msg.Relays) != 1 || !slices.Equal(list.Msg.Relays[0].Users, []string{"bob"}) || list.Msg.Relays[0].UsersNone {
+		t.Fatalf("relays %v (%v)", list.Msg.GetRelays(), err)
+	}
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SetUsers: true, Users: []string{"carol"}})); err == nil {
+		t.Fatal("a relay for a user that does not exist")
+	}
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SetUsers: true})); err != nil {
+		t.Fatal(err)
+	}
+	if got := devices(); len(got) != 2 {
+		t.Fatalf("relay for every user again: devices %v", got)
+	}
 }
 
 // A relay's probe endpoint (relay-v1 §9.1): a local service of its own ID,

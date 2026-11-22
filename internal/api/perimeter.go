@@ -293,7 +293,14 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	if err != nil {
 		return nil, err
 	}
+	forUser, err := p.relayDevices(ctx, relay)
+	if err != nil {
+		return nil, err
+	}
 	for _, d := range devices {
+		if !forUser(d.ID) {
+			continue // not of a user the relay is for (relay-v1 §4.1): its K_relay stays here
+		}
 		var allowed []uint32
 		for _, id := range d.Allowed {
 			if scoped[id] {
@@ -394,12 +401,45 @@ func (p *PerimeterServer) RelayKnows(ctx context.Context, name, device string) (
 	if err != nil {
 		return false, err
 	}
+	forUser, err := p.relayDevices(ctx, relay)
+	if err != nil || !forUser(device) {
+		return false, err
+	}
 	for _, d := range devices {
 		if d.ID == device {
 			return slices.ContainsFunc(d.Allowed, func(id uint16) bool { return scoped[id] }), nil
 		}
 	}
 	return false, nil
+}
+
+// relayDevices reports whether a device is of a user the relay is for
+// (relay-v1 §4.1): every device for a relay of every user.
+func (p *PerimeterServer) relayDevices(ctx context.Context, relay store.Relay) (func(string) bool, error) {
+	if relay.Users == nil {
+		return func(string) bool { return true }, nil
+	}
+	users, err := p.Store.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, u := range users {
+		if relay.For(u.ID) {
+			names[u.Name] = true
+		}
+	}
+	devices, err := p.Store.ListDevices(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	for _, d := range devices {
+		if names[d.UserName] {
+			ids[d.ID] = true
+		}
+	}
+	return func(id string) bool { return ids[id] }, nil
 }
 
 // openPort is the one port "open" makes public.

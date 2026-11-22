@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 )
@@ -30,6 +31,14 @@ type Relay struct {
 	// and empty for a bundle that had none.
 	ProbePort uint16
 	ProbePin  string
+	// Users are the IDs of the users the relay is for (relay-v1 §4.1),
+	// sorted; nil: every user.
+	Users []int64
+}
+
+// For reports whether the relay is for the user with this ID.
+func (r Relay) For(user int64) bool {
+	return r.Users == nil || slices.Contains(r.Users, user)
 }
 
 // CreateRelay adds a relay: a name and one public address.
@@ -57,7 +66,7 @@ func (s *Store) CreateRelay(ctx context.Context, name string, addr netip.Addr) (
 // ListRelays returns the relays by name.
 func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, created_at, COALESCE(spa_json, ''), ssh_port, COALESCE(cert_pin, ''), COALESCE(admin_json, ''),
-		COALESCE(probe_port, 0), COALESCE(probe_pin, '') FROM relays ORDER BY name`)
+		COALESCE(probe_port, 0), COALESCE(probe_pin, ''), COALESCE(users_json, '') FROM relays ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -65,10 +74,16 @@ func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
 	var out []Relay
 	for rows.Next() {
 		var r Relay
-		var addr, spaJSON, adminJSON string
+		var addr, spaJSON, adminJSON, usersJSON string
 		var created int64
-		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin, &adminJSON, &r.ProbePort, &r.ProbePin); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin, &adminJSON, &r.ProbePort, &r.ProbePin, &usersJSON); err != nil {
 			return nil, err
+		}
+		if usersJSON != "" {
+			r.Users = []int64{}
+			if err := json.Unmarshal([]byte(usersJSON), &r.Users); err != nil {
+				return nil, fmt.Errorf("relay %s users: %w", r.Name, err)
+			}
 		}
 		if adminJSON != "" {
 			if err := json.Unmarshal([]byte(adminJSON), &r.Admin); err != nil {
@@ -185,6 +200,34 @@ func (s *Store) SetRelayAccess(ctx context.Context, name string, sshPort uint16,
 		return err
 	}
 	return s.affectOne(ctx, "relay", name, `UPDATE relays SET ssh_port = ?, admin_json = ? WHERE name = ?`, sshPort, string(b), name)
+}
+
+// SetRelayUsers sets the users a relay is for (relay-v1 §4.1): nil for
+// every user; else the IDs, each of a user that exists, at least one.
+func (s *Store) SetRelayUsers(ctx context.Context, name string, users []int64) error {
+	if users == nil {
+		return s.affectOne(ctx, "relay", name, `UPDATE relays SET users_json = NULL WHERE name = ?`, name)
+	}
+	if len(users) == 0 {
+		return fmt.Errorf("%w relay users: none (every user is all)", ErrInvalid)
+	}
+	ids := slices.Clone(users)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	for _, id := range ids {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = ?`, id).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("%w relay users: no user %d", ErrNotFound, id)
+		}
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET users_json = ? WHERE name = ?`, string(b), name)
 }
 
 // SetRelayAdmin replaces the prefixes that reach the relay host's SSH

@@ -1452,6 +1452,18 @@ func oneLabelUnder(name, domain string) bool {
 // all nor among taken (zones chosen in the same change), nor by the node's
 // other names.
 func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ...string) (string, error) {
+	return newName(ctx, st, all, 3, taken...)
+}
+
+// RelayLabelLen is the length of the label of a relay's name made since
+// v0.36.0 (relay-names-v1 §3): the name comes in the subscription, never
+// in a QR code, and 3 characters (46 656 of them) let a scan of the
+// domain find every relay's address behind the wildcard.
+const RelayLabelLen = 12
+
+// newName is a name of one label of n characters under the node's domain
+// that no zone, service or relay name takes (newZone's for n = 3).
+func newName(ctx context.Context, st *store.Store, all []store.Service, n int, taken ...string) (string, error) {
 	domain, err := Domain(ctx, st)
 	if err != nil {
 		return "", err
@@ -1462,6 +1474,9 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	// As zones are kept and compared: a domain stored before Init
 	// canonicalized it may have capitals or a final dot.
 	domain = canonicalZone(domain)
+	if n+1+len(domain) > 253 {
+		return "", fmt.Errorf("%w: no name of a %d-character label fits under %s", store.ErrInvalid, n, domain)
+	}
 	// Nor the name DNS tunnel zones are delegated to, nor the node's own
 	// name (names-v1 §2), nor a relay's (relay-names-v1 §3).
 	ns, _ := st.GetSetting(ctx, settingNSName)
@@ -1474,7 +1489,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	// took, clashes with every name under it, and the search went on
 	// forever, the render and the DNS sync with it.
 	for range 10000 {
-		label := make([]byte, 3)
+		label := make([]byte, n)
 		for i := range label {
 			n, err := randInt(0, len(alphabet)-1)
 			if err != nil {

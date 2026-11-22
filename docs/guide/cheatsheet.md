@@ -241,7 +241,11 @@ rayctl relay ports msk   # с v0.31.0: порты хоста relay для фай
                          # сертификат с именами relay
 rayctl relay set -admin 203.0.113.9 msk   # адреса для SSH хоста relay (и -ssh-port), без нового пакета; при смене
                                           # порта sshd на relay сначала слушает оба, потом новый (руководство §12.4)
-rayctl relay list   # с портом замера (PROBE); с v0.35.0 — имена relay (RELAY SERVICE NAME READY): своё имя
+rayctl relay set -users alice,bob msk   # с v0.36.0: relay только для этих пользователей (-users all — для всех);
+                                        # остальные его не видят, а relay не знает их устройств (relay-v1 §4.1)
+rayctl relay set -renew-names msk       # с v0.36.0: имена relay заново, с метками в 12 символов; старые перестают
+                                        # разрешаться, клиенты берут новые со следующей подпиской
+rayctl relay list   # с портом замера (PROBE) и тем, для кого он (USERS, с v0.36.0); с v0.35.0 — имена relay (RELAY SERVICE NAME READY): своё имя
                     # на каждый сервис (REALITY с сайтом, naive, DoH, hy2-masq), ведёт на адрес relay; клиентам
                     # уходит в via_links, когда READY yes; без Cloudflare записи A — из rayctl dns
 rayctl relay remove msk   # потерянный relay: только remove отнимает у его адреса порты сервисов

@@ -370,3 +370,54 @@ func TestRelayNamesDNS(t *testing.T) {
 		}
 	}
 }
+
+// relay-names-v1 §3 since v0.36.0: a new name has a label of RelayLabelLen
+// characters; one made before with 3 stays until -renew-names, and status
+// says so, once a relay.
+func TestRelayNameLabels(t *testing.T) {
+	ctx, st := relayNode(t)
+	got := relayNamesOf(t, ctx, st)
+	for pair, n := range got {
+		if label, _, _ := strings.Cut(n, "."); len(label) != RelayLabelLen {
+			t.Errorf("%s: %s, a label of %d", pair, n, len(label))
+		}
+	}
+	names, err := RelayNames(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := RelayNameWarnings(names); len(w) != 0 {
+		t.Errorf("warnings for long labels: %v", w)
+	}
+	// Names stored as v0.35 made them: kept, and warned about once.
+	stored := map[string]map[int64]string{}
+	for i, rn := range names {
+		if stored[rn.Relay] == nil {
+			stored[rn.Relay] = map[int64]string{}
+		}
+		stored[rn.Relay][rn.Service] = fmt.Sprintf("s%02d.example.com", i)
+	}
+	b, _ := json.Marshal(stored)
+	if err := st.SetSetting(ctx, settingRelayNames, b); err != nil {
+		t.Fatal(err)
+	}
+	short := relayNamesOf(t, ctx, st)
+	for pair, n := range short {
+		if label, _, _ := strings.Cut(n, "."); len(label) != 3 {
+			t.Errorf("%s: a stored short name made again: %s", pair, n)
+		}
+	}
+	names, _ = RelayNames(ctx, st)
+	if w := RelayNameWarnings(names); len(w) != 1 || !strings.Contains(w[0], "relay r1:") || !strings.Contains(w[0], "-renew-names r1") {
+		t.Errorf("warnings %v", w)
+	}
+	// Forgotten (rayctl relay set -renew-names): long ones again.
+	if err := ForgetRelayNames(ctx, st, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	for pair, n := range relayNamesOf(t, ctx, st) {
+		if label, _, _ := strings.Cut(n, "."); len(label) != RelayLabelLen || n == short[pair] {
+			t.Errorf("%s renewed: %s", pair, n)
+		}
+	}
+}

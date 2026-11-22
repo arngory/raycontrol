@@ -43,8 +43,8 @@ const settingSPAParams = "spa_params"
 //   - a service disabled or deleted stays disabled, a REALITY no longer open
 //     is not open, and a DNS tunnel keeps the stricter dnsauth mode;
 //   - an unused invite withdrawn stays withdrawn, a relay removed stays
-//     removed, and a relay's certificate, SPA, SSH access and probe
-//     endpoint stay as now;
+//     removed, and a relay's certificate, SPA, SSH access, probe endpoint
+//     and users stay as now;
 //   - the settings named in keep (the admin addresses, the node's own
 //     name, the relays' names) take current's value.
 //
@@ -223,6 +223,10 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		    probe_port = (SELECT c.probe_port FROM cur.relays c WHERE c.id = relays.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id
 		                AND (c.probe_pin IS NOT relays.probe_pin OR c.probe_port IS NOT relays.probe_port))`},
+		// Whom it is for (relay-v1 §4.1), as its snapshot now has it: a relay
+		// taken from a user stays taken.
+		{"relays", "users_json", `UPDATE relays SET users_json = (SELECT c.users_json FROM cur.relays c WHERE c.id = relays.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.users_json IS NOT relays.users_json)`},
 	} {
 		// The copy may be older than the table or the column; the current
 		// database is newer, so it has them.

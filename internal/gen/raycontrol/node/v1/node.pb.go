@@ -1605,7 +1605,12 @@ type Relay struct {
 	// The relay's names (relay-names-v1 §3): one for each service it
 	// forwards whose SNI is the node's, resolving to the relay's address.
 	// Since v0.35.0; empty from a node before.
-	Names         []*RelayName `protobuf:"bytes,6,rep,name=names,proto3" json:"names,omitempty"`
+	Names []*RelayName `protobuf:"bytes,6,rep,name=names,proto3" json:"names,omitempty"`
+	// The users it is for (relay-v1 §4.1), by name; empty: every user,
+	// unless users_none: those it was for are all gone, it is for no one.
+	// Since v0.36.0.
+	Users         []string `protobuf:"bytes,7,rep,name=users,proto3" json:"users,omitempty"`
+	UsersNone     bool     `protobuf:"varint,8,opt,name=users_none,json=usersNone,proto3" json:"users_none,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1680,6 +1685,20 @@ func (x *Relay) GetNames() []*RelayName {
 		return x.Names
 	}
 	return nil
+}
+
+func (x *Relay) GetUsers() []string {
+	if x != nil {
+		return x.Users
+	}
+	return nil
+}
+
+func (x *Relay) GetUsersNone() bool {
+	if x != nil {
+		return x.UsersNone
+	}
+	return false
 }
 
 // RelayName is a relay's name for one service of the node.
@@ -2273,10 +2292,17 @@ func (x *IssueRelayBundleResponse) GetPorts() []*RelayPort {
 }
 
 type SetRelayAccessRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	SshPort       uint32                 `protobuf:"varint,2,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"` // 0 keeps it
-	Admin         []string               `protobuf:"bytes,3,rep,name=admin,proto3" json:"admin,omitempty"`                     // empty keeps them
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	SshPort uint32                 `protobuf:"varint,2,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"` // 0 keeps it
+	Admin   []string               `protobuf:"bytes,3,rep,name=admin,proto3" json:"admin,omitempty"`                     // empty keeps them
+	// The users the relay is for (relay-v1 §4.1), by name, with set_users:
+	// empty for every user. Without set_users they stay. Since v0.36.0.
+	SetUsers bool     `protobuf:"varint,4,opt,name=set_users,json=setUsers,proto3" json:"set_users,omitempty"`
+	Users    []string `protobuf:"bytes,5,rep,name=users,proto3" json:"users,omitempty"`
+	// Make the relay's names again, with labels of the current length
+	// (relay-names-v1 §3): the ones before stop resolving. Since v0.36.0.
+	RenewNames    bool `protobuf:"varint,6,opt,name=renew_names,json=renewNames,proto3" json:"renew_names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2330,6 +2356,27 @@ func (x *SetRelayAccessRequest) GetAdmin() []string {
 		return x.Admin
 	}
 	return nil
+}
+
+func (x *SetRelayAccessRequest) GetSetUsers() bool {
+	if x != nil {
+		return x.SetUsers
+	}
+	return false
+}
+
+func (x *SetRelayAccessRequest) GetUsers() []string {
+	if x != nil {
+		return x.Users
+	}
+	return nil
+}
+
+func (x *SetRelayAccessRequest) GetRenewNames() bool {
+	if x != nil {
+		return x.RenewNames
+	}
+	return false
 }
 
 type SetRelayAccessResponse struct {
@@ -10241,7 +10288,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x05cidrs\x18\x01 \x03(\tR\x05cidrs\"-\n" +
 	"\x15SetAdminAccessRequest\x12\x14\n" +
 	"\x05cidrs\x18\x01 \x03(\tR\x05cidrs\"\x18\n" +
-	"\x16SetAdminAccessResponse\"\xdd\x01\n" +
+	"\x16SetAdminAccessResponse\"\x92\x02\n" +
 	"\x05Relay\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x1d\n" +
@@ -10250,7 +10297,10 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"probe_port\x18\x04 \x01(\rR\tprobePort\x123\n" +
 	"\x05ports\x18\x05 \x03(\v2\x1d.raycontrol.node.v1.RelayPortR\x05ports\x123\n" +
-	"\x05names\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.RelayNameR\x05names\"i\n" +
+	"\x05names\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.RelayNameR\x05names\x12\x14\n" +
+	"\x05users\x18\a \x03(\tR\x05users\x12\x1d\n" +
+	"\n" +
+	"users_none\x18\b \x01(\bR\tusersNone\"i\n" +
 	"\tRelayName\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -10288,11 +10338,15 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"admin_kept\x18\x04 \x01(\bR\tadminKept\x12\x1d\n" +
 	"\n" +
 	"probe_port\x18\x05 \x01(\rR\tprobePort\x123\n" +
-	"\x05ports\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.RelayPortR\x05ports\"\\\n" +
+	"\x05ports\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.RelayPortR\x05ports\"\xb0\x01\n" +
 	"\x15SetRelayAccessRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +
-	"\x05admin\x18\x03 \x03(\tR\x05admin\"\x18\n" +
+	"\x05admin\x18\x03 \x03(\tR\x05admin\x12\x1b\n" +
+	"\tset_users\x18\x04 \x01(\bR\bsetUsers\x12\x14\n" +
+	"\x05users\x18\x05 \x03(\tR\x05users\x12\x1f\n" +
+	"\vrenew_names\x18\x06 \x01(\bR\n" +
+	"renewNames\"\x18\n" +
 	"\x16SetRelayAccessResponse\"\x16\n" +
 	"\x14GetDeploymentRequest\"\xe8\x02\n" +
 	"\x15GetDeploymentResponse\x124\n" +

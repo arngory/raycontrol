@@ -460,6 +460,9 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		if policy, err := node.ClientPolicy(ctx, s.Store); err == nil {
 			resp.Warnings = append(resp.Warnings, provision.ZoneWarnings(services, policy, time.Now())...)
 		}
+		if names, err := provision.RelayNames(ctx, s.Store); err == nil {
+			resp.Warnings = append(resp.Warnings, provision.RelayNameWarnings(names)...)
+		}
 	}
 	return connect.NewResponse(resp), nil
 }

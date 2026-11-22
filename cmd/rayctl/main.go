@@ -160,7 +160,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
                                             each, reaching the service ports without SPA
   relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle: new certificate, new SPA keys (root only)
-  relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
+  relay set [-ssh-port N] [-admin CIDRS] [-users U,..|all] [-renew-names] NAME
+                                            the relay host's SSH access, without a new bundle; the users
+                                            the relay is for; its names made again with long labels
   relay ports NAME                          every port the relay host takes, for a provider's firewall
                                             in front of it: its SSH, SPA range and probe endpoint, and
                                             the exit's ports it forwards (relay bundle prints them too)
