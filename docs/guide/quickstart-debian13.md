@@ -1951,8 +1951,8 @@ xattr -d com.apple.quarantine rayctl
 - `remote enroll` — регистрация по приглашению (§10.4), PIN спрашивается без показа на экране;
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `ports`,
-  `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода
-  разрешает удалённому устройству, решает она сама (§10.4): так, окно отладки открывает и закрывает только root на
+  `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `client`, `integration`, `traffic`, `metrics`,
+  `stats`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама (§10.4): так, окно отладки открывает и закрывает только root на
   ноде, через `-remote` работает лишь `debug show`.
 - `knock` и `probe` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
@@ -3149,7 +3149,8 @@ checked: rayctl -remote laptop.rcdev status
   rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev (if its filesystem keeps no modes: copy it to your home directory, chmod 600 the copy)
   ```
 - Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay list`,
-  `relay ports`, `relay set`, `dns`, `summary`, `app-mirror`, `metrics`, `debug show` и `version`. Остальное отвечает
+  `relay ports`, `relay set`, `dns`, `summary`, `app-mirror`, `client`, `integration`, `traffic`, `metrics`, `stats`,
+  `debug show` и `version`. Остальное отвечает
   отказом одного из трёх видов:
   - `… works on the node itself, not through -remote` — у `install`, `apply`, `update`, `uninstall`, `backup`,
     `restore`, `report`, `egress`, `conn-limit`, `roots`;
@@ -3581,6 +3582,30 @@ rayctl report -logs info -since 24h -o /root/report.txt
 Отчёт никуда не отправляется. Прочитайте файл и решите сами, показывать ли его. Со строками окна отладки —
 `-logs debug`; несколько отчётов по одной проблеме — с одним `-id`.
 
+**Статистика за час** (с v0.33.0, [spec/stats-v1.md](../spec/stats-v1.md)):
+
+```bash
+rayctl stats -last 1h -id stall-1 -o /root/stall-1.stats.json
+```
+
+```
+stats stall-1 written to /root/stall-1.stats.json
+```
+
+- `rayd` раз в минуту снимает то, что показывает `rayctl metrics`, и счётчики хоста, и держит два часа в памяти.
+  Файл — JSON: прирост каждого счётчика за окно, конец, минимум и максимум каждого уровня, процессор, память,
+  место под состояние ноды, сеть по интерфейсам, устройства по версиям клиента. На ноде от root — ещё версии
+  niko-server и Xray и число записей журнала уровня warning и хуже по юнитам, без текста.
+- Имён, адресов, доменов и ключей в нём нет: сервисы названы `naive#1`, `hy2-masq#1`. Его можно отдавать.
+- `-last` — от 5m до 2h. `-id` — латинские буквы, цифры, `.`, `-` и `_`, до 64 знаков: возьмите ID тест-прогона
+  клиента, тогда файл ноды и файл клиента читаются вместе. В Niko 1.60 и новее статистика за час — в журнале
+  приложения (по записи в handoff/SYNC.md, T23).
+- `"partial": true` и `partial_why` — окно покрыто не целиком: `rayd` моложе окна, счётчик ушёл назад (процесс
+  перезапустился), пропуск в снимках.
+- Через удалённый API — `rayctl -remote ФАЙЛ stats`, без журнала и версий бинарников.
+
+Пошаговый разбор жалобы «работает, потом замирает» — §13, «Профиль работает, потом замирает».
+
 Полная выгрузка журналов — только для себя: в ней адреса и имена. Время начала подставьте своё:
 
 ```bash
@@ -3734,7 +3759,7 @@ rayctl restore -i /root/node-2026-11-14.rcbak
 
 ### 12.3. Обновление ноды
 
-Обновление по шагам, вместе с relay и машинами администраторов: с v0.27.0 и новее до v0.31.0 — §12.5, с v0.26.0 —
+Обновление по шагам, вместе с relay и машинами администраторов: с v0.27.0 и новее до v0.35.1 — §12.5, с v0.26.0 —
 §12.6, затем шаги 3–6 §12.5.
 
 **Какая версия стоит:**
@@ -3760,10 +3785,10 @@ rayctl update -check
 ```
 
 ```
-installed v0.30.0, release v0.31.0 available: rayctl update
+installed v0.35.0, release v0.35.1 available: rayctl update
 ```
 
-или, если обновлять нечего: `raycontrol v0.31.0 is installed, the newest release`.
+или, если обновлять нечего: `raycontrol v0.35.1 is installed, the newest release`.
 
 **Обновить:**
 
@@ -3775,12 +3800,12 @@ rayctl update
 
 1. `rayctl` скачивает релиз и проверяет его так же, как установщик (§3.3): подпись, версию, контрольную сумму. Пока
    проверка не прошла, из архива ничего не запускается.
-2. Печатает `release v0.31.0 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
+2. Печатает `release v0.35.1 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
    релиза.
 3. Тот печатает состав релиза и спрашивает:
 
    ```
-   Update raycontrol v0.30.0 to v0.31.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
+   Update raycontrol v0.35.0 to v0.35.1? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
    ```
 
    Введите `yes`.
@@ -3792,7 +3817,7 @@ rayctl update
 Успех:
 
 ```
-raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update -rollback
+raycontrol v0.35.1 is running; the previous binaries are kept for rayctl update -rollback
 ```
 
 - **Клиенты** переподключаются сами; перерыв — около минуты.
@@ -3816,7 +3841,7 @@ raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update 
   устройства, откат не возвращает. Новые данные при откате получают пользователи устройств, отозванных после
   обновления, и с `-overlap` тоже (прежняя версия с `-cred-period 0` смену не довела бы), и, с v0.31.0,
   пользователи устройств, добавленных после обновления: откат их убирает. Их устройства переподключатся после
-  следующей подписки. Если схема та же (откат с v0.31.0 на v0.27.0–v0.30.x), база остаётся как есть, кроме
+  следующей подписки. Если схема та же (например, откат с v0.35.1 на v0.34.0 или v0.35.0), база остаётся как есть, кроме
   одного: пользователям устройств, отозванных с `-overlap`, чья смена ещё идёт, откат при `-cred-period 0` тоже даёт
   новые данные, остановив `rayd`, и так же `rayctl update -version` на версию до v0.31.0 (§12.5, «Если нужно
   вернуться»). Пользователь или сервис, удалённые после
@@ -3834,7 +3859,7 @@ raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update 
   ```
 
   Подпись проверяется так же.
-- **Конкретная версия:** `rayctl update -version v0.31.0`. На более старую версию нода сама не уходит: её надо
+- **Конкретная версия:** `rayctl update -version v0.35.1`. На более старую версию нода сама не уходит: её надо
   назвать явно. Назад на версию до v0.31.0 при `-cred-period 0` — с обновлением данных после отзывов с `-overlap`
   (§12.5, «Если нужно вернуться»); `bootstrap.sh` релиз старше установленного поверх ноды не ставит.
 - **Только одно обновление, откат или `apply` за раз.** Второе сразу откажет: `another … is running`.
@@ -3866,10 +3891,11 @@ rayctl update auto patch -window 03:00-05:00
 rayd checks GitHub for releases every ~6 h and updates to a newer patch release of this minor version in the window 03:00-05:00, node time (rayctl update status)
 ```
 
-- Ставятся только **патч-версии** той же минорной: v0.31.0 → v0.31.2, но не v0.32.0. Минорные обновления — руками.
+- Ставятся только **патч-версии** той же минорной: v0.35.0 → v0.35.1, но не v0.36.0. Минорные обновления — руками.
+  v0.36.0 здесь и в примерах ниже — условный номер: такого релиза при правке не было.
 - **Самая новая патч-версия вашей минорной** — с v0.27.0. Нода спрашивает у GitHub последний релиз. Если это
-  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.32.0) или та версия, что
-  стоит, — нода по очереди спрашивает следующие номера своей: v0.31.1, v0.31.2 и так далее, и ставит самый
+  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.36.0) или та версия, что
+  стоит, — нода по очереди спрашивает следующие номера своей: v0.35.1, v0.35.2 и так далее, и ставит самый
   старший найденный. Один пропущенный номер (релиз сняли, а следом вышел исправленный) она переступает, на двух
   подряд останавливается; если последний релиз — та версия, что стоит, она спрашивает только следующий номер. За
   одну проверку — не больше 8 номеров, то есть не больше 18 запросов к GitHub. Обычно запросов 3: последний релиз
@@ -3879,15 +3905,15 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
   `ok … ago:`:
 
   ```
-  patch, window 03:00-05:00: v0.32.0 is out, a new minor version, which it leaves: this node runs v0.31.0; rayctl update takes it (or an admin's phone, with remote updates on)
+  patch, window 03:00-05:00: v0.36.0 is out, a new minor version, which it leaves: this node runs v0.35.0; rayctl update takes it (or an admin's phone, with remote updates on)
   ```
 
   Всегда — в `rayctl update status`, вместе с найденным патчем, если он есть:
 
   ```
-  latest     v0.32.0
-  patch      v0.31.2, the newest patch release of v0.31.0: the auto update takes it in its window
-  newer      v0.32.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
+  latest     v0.36.0
+  patch      v0.35.1, the newest patch release of v0.35.0: the auto update takes it in its window
+  newer      v0.36.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
   ```
 
   Так с v0.27.0. Нода на v0.26.x о новой минорной не говорит и патчи своей минорной после выхода v0.27.0 сама не
@@ -3895,8 +3921,8 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
 - `rayctl update -check` при новой минорной называет и самый новый патч вашей (с v0.27.0):
 
   ```
-  installed v0.31.0, release v0.32.0 available: rayctl update
-  release v0.31.2, the newest patch release of v0.31.0, available: rayctl update -version v0.31.2
+  installed v0.35.0, release v0.36.0 available: rayctl update
+  release v0.35.1, the newest patch release of v0.35.0, available: rayctl update -version v0.35.1
   ```
 - Окно — по часам сервера, не короче 30 минут; без `-window` — 03:00–05:00.
 - Ставятся только подписанные релизы и никогда не старее установленного.
@@ -3919,8 +3945,8 @@ rayctl update status
 ```
 
 ```
-installed  v0.31.0
-latest     v0.31.0
+installed  v0.35.1
+latest     v0.35.1
 remote     off
 auto       patch (window 03:00-05:00, CET +01:00)
 last       none
@@ -3981,11 +4007,11 @@ last       none
   обновления relay (§6.7.8).
 - **Хост relay потерян или захвачен** — сразу `rayctl relay remove` на ноде (§6.7.11).
 
-### 12.5. Обновление с v0.27.0 и новее до v0.31.0
+### 12.5. Обновление с v0.27.0 и новее до v0.35.1
 
-Для ноды на v0.27.0, v0.28.x, v0.29.0 или v0.30.0 и её relay. Нода на v0.26.0 обновляется сразу на v0.31.0 по шагам
-§12.6: всё, что там сказано о v0.27.0, случится в этом же обновлении, а строки вывода назовут v0.31.0; затем — шаги
-3–6 этого раздела.
+Для ноды на v0.27.0 и новее (до v0.35.0 включительно) и её relay. Нода на v0.26.0 обновляется сразу на v0.35.1 по
+шагам §12.6: всё, что там сказано о v0.27.0, случится в этом же обновлении, а строки вывода назовут v0.35.1; затем —
+шаги 3–6 этого раздела. В примерах ниже нода на v0.27.0; с другой версии строки назовут её.
 
 Что изменилось после v0.27.0, коротко:
 
@@ -3999,13 +4025,43 @@ last       none
 - **v0.30.0** — флаг `udp` у naive: UDP датаграммами HTTP/3, по умолчанию выключен (§8, naive).
 - **v0.31.0** — `rayctl service peer-keys` для своего пира Yggdrasil (§8), `rayctl relay ports` и все порты хоста
   relay в `rayctl relay bundle` (§6.7.6), счётчики UDP naive в `rayctl metrics` (§8, naive).
+- **v0.31.2, v0.31.3** — niko-server v0.18.2 и v0.18.3: UDP-фронт держит потоки с подделанных адресов, keepalive
+  Hysteria2 28 с (§8, Hysteria2). Сам raycontrol не менялся. v0.31.1 не выпускался.
+- **v0.32.0** — минимальная версия клиента, `rayctl client`, столбец `CLIENT` в `rayctl device list` (§10.9).
+- **v0.33.0** — `rayctl stats` (§12.1) и `raycontrol_sub_requests_total{outcome}` в `rayctl metrics`.
+- **v0.34.0** — роли `billing` и `support`, постоянные адреса интеграций, OpenAPI в файлах выпуска (§10.8);
+  `rayctl user expires`, `rayctl traffic counting`; имя ноды под доменом (§5.2). Исправлено: с именем в `-host`
+  синхронизация DNS удаляла записи ноды в Cloudflare.
+- **v0.35.0** — стук v3 с адресом ноды (§7), приглашения `RCINV3:` (§10.2), имена relay (§6.7.7), REALITY с любой
+  целью TLS 1.3 (§8).
+- **v0.35.1** — исправления по разбору протоколов: квоты и бюджеты SPA (ниже), PIN по умолчанию у приглашений
+  `admin` и `billing` (§10.3, §10.4), потолок Brutal у Hysteria2 (§8), срок рукопожатия VLESS (§8, REALITY),
+  niko-server v0.18.4 и v0.18.5 (пробы DNS, выходы и повторы Yggdrasil, сбросы и пары UDP у Hysteria2), пары UDP
+  после DNS — 30 с у всех трёх процессов (§13, «Профиль работает, потом замирает»); `RCINV3:` — по умолчанию.
 
 **Что произойдёт само и что нет.**
 
-- **Автообновление v0.31.0 не поставит:** это новая минорная версия (§12.3). Обновить — `rayctl update` на ноде или
-  с телефона администратора, если на ноде `rayctl update remote on`.
-- **База не меняется** (схема 15): откат её не возвращает и ничего не спрашивает (но после отзывов с `-overlap` —
-  ниже, «Если нужно вернуться»).
+- **Автообновление** ставит v0.35.1 само только ноде на v0.35.0: это патч. С более ранней версии это новая
+  минорная (§12.3): обновить — `rayctl update` на ноде или с телефона администратора, если на ноде
+  `rayctl update remote on`.
+- **База меняется:** v0.32.0 добавил столбцы клиента у устройств (миграция 16), v0.34.0 — роли и адреса интеграций
+  (миграции 17 и 18). `rayctl update` копирует базу перед обновлением, откат её возвращает и спрашивает
+  подтверждение (§12.3). С v0.34.0 и v0.35.0 схема та же. После отзывов с `-overlap` — ещё и ниже, «Если нужно
+  вернуться».
+- **Hysteria2 без `up_mbps`** получает потолок Brutal по скорости порта, если ядро её знает, и один раз
+  перезапускается. Нода, где стоял `up_mbps=0`, тоже получает потолок порта: задайте `up_mbps=0` снова (§8,
+  Hysteria2). Что взято, показывает `node WARNING` в `rayctl status`.
+- **SPA** (spa-v2 §6, v0.35.1): одно устройство — не больше 256 стуков за 61 с, сверх отказывают только ему; предел
+  пакетов SPA — на адрес IPv4 и на сеть IPv6 /64 (раньше /128), 20 в секунду с запасом 40; доступ одного устройства
+  — не больше чем с 32 адресов сразу. Честному клиенту хватает с запасом. `rayspa` раз в минуту предупреждает в
+  журнале об устройстве у квоты (по ID, без адреса), о переполнении кэша, потоке пакетов, шаге часов назад и
+  отказе файрвола. `rayd` не запускается с `-spa-ttl` или `-spa-max-ttl` меньше секунды.
+- **Правило продления для клиентов** (spa-v2 §6, v0.35.1): стук, который сдвинул бы конец доступа меньше чем на
+  `min(30 с, TTL/2)`, таблицу не меняет. Поэтому клиент продлевает доступ не позже чем за `min(30 с, TTL/2)` до
+  конца, считая от своего последнего стука. Niko делает так с arngory/niko#87; ноде настраивать нечего.
+- **Приглашения:** `-role admin` и `-role billing` теперь с PIN, без него — `-pin=false`. По умолчанию — `RCINV3:`;
+  телефонам с Niko старше 1.63 — `-format rcinv2` (§10.2).
+
 - **Клиентам ничего делать не надо.** Как при любом обновлении, `rayd`, `rayspa` и data plane перезапускаются:
   клиенты переподключаются, перерыв — около минуты.
 - **naive** (если нода на v0.28.x или раньше): первый рендер после обновления выбирает каждому naive следующее имя, и
@@ -4017,12 +4073,15 @@ last       none
 - **Флаг `udp` у naive** выключен и сам не включается: на ноде ничего не меняется, пока вы его не включите (§8).
 - **Relay на v0.27.0 и раньше сами не обновятся:** у них нет того, что слушает слово ноды. Один раз — руками
   (шаг 3). До тех пор они работают, как работали.
+- **Relay до v0.35.0** не берут стук v3 к своему адресу и не пересылают TCP 80 для имён relay: пока их не обновили,
+  клиенты стучатся к ним v2, а без Cloudflare их имена не заказываются (`relays[].spa.versions` появляется, когда `rayspa`
+  relay сказал, что берёт v3).
 - **Машины администраторов:** прежний `rayctl` работает, но не знает новых команд (шаг 6).
 
 **Шаг 1. Резервная копия.** На ноде, от root:
 
 ```bash
-rayctl backup -o /root/node-before-v0.31.0.rcbak
+rayctl backup -o /root/node-before-v0.35.1.rcbak
 ```
 
 Заберите файл на свою машину; как проверить, что он открывается вашей фразой, — §12.6, шаг 1.
@@ -4034,16 +4093,16 @@ rayctl update -check
 ```
 
 ```
-installed v0.27.0, release v0.31.0 available: rayctl update
+installed v0.27.0, release v0.35.1 available: rayctl update
 ```
 
 ```bash
 rayctl update
 ```
 
-Строки — как в §12.3: `release v0.31.0 verified: its own rayctl updates the node`, вопрос
-`Update raycontrol v0.27.0 to v0.31.0? …` — введите `yes`, в конце
-`raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update -rollback`.
+Строки — как в §12.3: `release v0.35.1 verified: its own rayctl updates the node`, вопрос
+`Update raycontrol v0.27.0 to v0.35.1? …` — введите `yes`, в конце
+`raycontrol v0.35.1 is running; the previous binaries are kept for rayctl update -rollback`.
 
 - **С v0.27.0** флага `-no-relays` нет: его знает только `rayctl` с v0.28.0, а relay на v0.27.0 за нодой и так не
   идут.
@@ -4056,7 +4115,7 @@ rayctl update
 rayctl update status
 ```
 
-Строка `last       done: v0.27.0 → v0.31.0, by rayctl on the node, …`. Если перед нодой есть relay, в конце — их
+Строка `last       done: v0.27.0 → v0.35.1, by rayctl on the node, …`. Если перед нодой есть relay, в конце — их
 строки: `unknown: no word from it (an older relay, or its rayd relay does not run)` у relay на v0.27.0 и раньше (так
 и должно быть до шага 3), `off: …` у relay новее v0.27.0 с `remote off`, `waiting …`, `offered …`, `running …` и
 `done …` у тех, что идут за нодой.
@@ -4069,7 +4128,7 @@ rayctl update -check
 ```
 
 ```
-installed v0.27.0, release v0.31.0 available: rayctl update
+installed v0.27.0, release v0.35.1 available: rayctl update
 this host is a relay msk: rayctl update here updates it; remote and automatic updates do not apply to a relay
 ```
 
@@ -4081,10 +4140,10 @@ rayctl update
 
 Что вы должны увидеть:
 
-1. `release v0.31.0 verified: its own rayctl updates the relay`;
-2. `rayctl v0.31.0 updates the relay, handed over by the rayctl of v0.27.0`;
-3. вопрос `Update relay msk from v0.27.0 to v0.31.0? …` — введите `yes`;
-4. в конце `relay msk runs raycontrol v0.31.0; the previous binaries are kept for rayctl update -rollback`.
+1. `release v0.35.1 verified: its own rayctl updates the relay`;
+2. `rayctl v0.35.1 updates the relay, handed over by the rayctl of v0.27.0`;
+3. вопрос `Update relay msk from v0.27.0 to v0.35.1? …` — введите `yes`;
+4. в конце `relay msk runs raycontrol v0.35.1; the previous binaries are kept for rayctl update -rollback`.
 
 Пересылка через этот relay прерывается, обычно меньше минуты. Отказы и откат — §6.7.8. Relay до v0.26.0 —
 повторной установкой (§6.7.10). Relay на v0.28.0 и новее с `remote off` обновите так же или включите им `remote on`
@@ -4109,13 +4168,13 @@ Relay, который должен остаться на своей версии
 rayctl status
 ```
 
-`version` — `v0.31.0`, строк `FAILED` нет. С naive — строка `naive <сервис>` с именем и строка `naive-names` (§6.2).
+`version` — `v0.35.1`, строк `FAILED` нет; строки `node WARNING` — §6.2. С naive — строка `naive <сервис>` с именем и строка `naive-names` (§6.2).
 
 ```bash
 rayctl update status
 ```
 
-После шагов 3 и 4 — `relay      msk: v0.31.0, current`: relay на версии ноды. Следующее удавшееся обновление ноды
+После шагов 3 и 4 — `relay      msk: v0.35.1, current`: relay на версии ноды. Следующее удавшееся обновление ноды
 relay с `remote on` возьмут сами, по одному; что тогда видно — §6.7.9. На телефоне администратора строки relay
 показывает Niko 1.55.0 и новее (§6.7.9, «На телефоне администратора»).
 
@@ -4131,7 +4190,10 @@ rayctl relay ports msk
 **Шаг 6. Машины администраторов.** Поставьте новый `rayctl` на каждую машину, где вы пользуетесь `-remote` (§7,
 «`rayctl` на своей машине»). Прежний `rayctl` с новой нодой работает, но:
 
-- не знает `service peer-keys` (v0.31.0) и `relay ports` (v0.31.0): отвечает `rayctl: bad usage` и печатает справку;
+- не знает `service peer-keys` и `relay ports` (v0.31.0), `client` (v0.32.0), `stats` (v0.33.0), `integration`,
+  `traffic`, `user expires`, `device allow` и `remote export` (v0.34.0): отвечает `rayctl: bad usage` и печатает
+  справку;
+- до v0.35.0 стучит только v2; до v0.35.1 делает приглашения по умолчанию `RCINV2:` и без PIN у `-role admin`;
 - не показывает имена naive в `rayctl status` и `rayctl service list` и новые строки `service rotate` у naive
   (v0.29.0);
 - `rayctl` до v0.28.0 не знает `rayctl update -no-relays`, но на машине администратора он и не нужен.
@@ -4143,11 +4205,19 @@ rayctl relay ports msk
 - смена имени naive (§8, naive): по расписанию она идёт только под wildcard-сертификатом; без токена Cloudflare —
   командой `rayctl service rotate naive`, когда имя заблокировали;
 - UDP naive датаграммами (§8, naive) — пока клиенты его не умеют, включать незачем;
+- потолок Brutal у Hysteria2 — задайте `up_mbps` по скорости канала VPS (§8, Hysteria2);
+- `rayctl traffic counting on` и устройства интеграций (§10.8), минимальная версия клиента (§10.9) — если нужны;
+- с relay без Cloudflare — TCP 80 у провайдера relay для его имён (§6.7.4, §6.7.7);
 - свой пир Yggdrasil (§8, Yggdrasil, «Свой пир») — если ставите `peers`.
 
 **Если нужно вернуться.**
 
-- **Нода:** `rayctl update -rollback`. Схема базы та же, поэтому вопроса о базе нет. Откат ниже v0.29.0 оставляет
+- **Нода:** `rayctl update -rollback`. С v0.33.0 и раньше схема базы другая: откат вернёт скопированную базу и
+  спросит подтверждение — сделанное после обновления пропадёт (§12.3); с v0.34.0 и v0.35.0 вопроса нет. Откат ниже
+  v0.34.0 убирает имя ноды из новых пакетов; устройства, у которых оно уже есть, ходят по нему дальше: запись
+  `*.example.com` ведёт на ту же ноду. Откат ниже v0.35.0 убирает стук v3 и имена relay: клиент повторяет стук v2 на
+  адрес ноды, а UDP-профили Hysteria2 у Niko 1.63 не работают до следующей подписки (spa-v3 §7). Откат ниже
+  v0.29.0 оставляет
   фронту только текущее имя naive: устройства, которые ещё ходят по прежнему имени, теряют naive, пока не возьмут
   подписку. Relay, которые уже обновились, остаются на своей версии: назад relay по слову ноды не ходят, а со
   старой нодой работают, как раньше.
@@ -4178,6 +4248,8 @@ rayctl relay ports msk
 |---|---|---|
 | `rayctl: bad usage` на `rayctl update -no-relays` | `rayctl` на ноде старше v0.28.0 | обновите ноду без флага: relay на v0.27.0 за ней и так не идут |
 | `rayctl: bad usage` на `service peer-keys` или `relay ports` | `rayctl` старше v0.31.0 | шаг 6 |
+| `rayctl: bad usage` на `client`, `stats`, `integration`, `traffic`, `user expires`, `device allow`, `remote export` | `rayctl` старше v0.32.0–v0.34.0 (шаг 6) | шаг 6 |
+| `rayctl status`: `node WARNING hy2-… Brutal …` после обновления | у Hysteria2 нет своего `up_mbps` (v0.35.1) | `rayctl service set ИМЯ up_mbps=N` по скорости канала, `0` — без потолка (§8, Hysteria2) |
 | на relay: `rayctl: this host is a relay: remote and automatic updates do not apply to it …` на `rayctl update remote on` | relay ещё на v0.27.0 или раньше | шаг 3, затем шаг 4 |
 | на relay: `this relay has no raycontrol-relay-update.path yet …: rayctl update first` | новый `rayctl` (например, из архива) на relay, который ещё на v0.27.0 | шаг 3 |
 | на relay: `the relay's probe endpoint (rayd relay) does not run …` | пакет relay без точки замера | §6.7.9 |
@@ -4188,8 +4260,8 @@ rayctl relay ports msk
 
 ### 12.6. Обновление с v0.26.0 на v0.27.0
 
-Для ноды, которая сейчас работает на v0.26.0. Сейчас по этим шагам она обновляется сразу на v0.31.0: строки вывода
-назовут v0.31.0 вместо v0.27.0, а что ещё изменилось после v0.27.0 — §12.5 (после этого раздела пройдите там шаги
+Для ноды, которая сейчас работает на v0.26.0. Сейчас по этим шагам она обновляется сразу на v0.35.1: строки вывода
+назовут v0.35.1 вместо v0.27.0, а что ещё изменилось после v0.27.0 — §12.5 (после этого раздела пройдите там шаги
 3–6). Раздел можно пройти, не читая остальные: ссылки на них — только за подробностями. Что меняется в v0.27.0,
 коротко:
 
