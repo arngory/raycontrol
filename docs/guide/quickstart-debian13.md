@@ -22,9 +22,9 @@
 > **Статус: что проверено и где.** Эта редакция сверена с кодом и тестами выпущенного v0.35.1 (тег `v0.35.1`,
 > коммит `063f2e8`, 22 ноября 2026 года): каждая новая или изменённая команда, флаг, путь и строка вывода взяты из
 > исходников этого тега. Тесты `cmd/rayctl`, `internal/api`, `internal/render`, `internal/naive`, `internal/spa`,
-> `internal/sub`, `internal/redact`, `internal/connlimit` и `internal/stats` при правке прошли на этом коде
-> (от root, без data plane и без systemd). Справка `rayctl help` и `rayctl version` — из опубликованного архива v0.35.1 для
-> amd64. Редакция для v0.25.1 сверялась ещё и с выводом собранных `rayctl` и `rayd`; то, что добавлено для
+> `internal/sub`, `internal/redact`, `internal/connlimit` и `internal/stats` при правке прошли на этом коде (от
+> root, без data plane и без systemd). Справка `rayctl help` и `rayctl version` — из опубликованного архива v0.35.1
+> для amd64. Редакция для v0.25.1 сверялась ещё и с выводом собранных `rayctl` и `rayd`; то, что добавлено для
 > v0.26.0–v0.35.1, взято из строк формата в коде и из тестов. Вывод `rayctl relay ports`, `rayctl relay bundle` (§6.7) и
 > `rayctl service peer-keys` (§8, Yggdrasil) — из теста `TestPeerKeysAndRelayPortsAPI` (запускался от root при
 > правке для v0.31.0): настоящий API `rayd` на временной базе, без data plane. Relay (§6.7), имена relay, свой пир
@@ -1457,7 +1457,8 @@ msk    naive    w8c.example.com  no: waiting for the certificate of site with it
 - Каждое имя без Cloudflare попадает в публичные журналы CT, и по домену можно найти адреса relay. С Cloudflare в
   журналах только `*.example.com`, но перебор коротких меток через DNS адреса relay всё равно найдёт.
 - Пока имени нет или оно не готово, клиент ходит через relay как раньше: на адрес relay с именем ноды в SNI.
-- Ссылки по именам relay берёт Niko 1.63 и новее (по записи в handoff/SYNC.md); прежние клиенты поле `via_links` подписки пропускают.
+- Ссылки по именам relay берёт Niko 1.63 и новее (по записи в handoff/SYNC.md); прежние клиенты поле `via_links`
+  подписки пропускают.
 
 ```bash
 rayctl update status
@@ -1952,8 +1953,8 @@ xattr -d com.apple.quarantine rayctl
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `ports`,
   `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `client`, `integration`, `traffic`, `metrics`,
-  `stats`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама (§10.4): так, окно отладки открывает и закрывает только root на
-  ноде, через `-remote` работает лишь `debug show`.
+  `stats`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама (§10.4): так,
+  окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
 - `knock` и `probe` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
   `remote enroll` флаг `-remote` пропускает: файл устройства он пишет сам (`-o`).
@@ -4074,8 +4075,8 @@ last       none
 - **Relay на v0.27.0 и раньше сами не обновятся:** у них нет того, что слушает слово ноды. Один раз — руками
   (шаг 3). До тех пор они работают, как работали.
 - **Relay до v0.35.0** не берут стук v3 к своему адресу и не пересылают TCP 80 для имён relay: пока их не обновили,
-  клиенты стучатся к ним v2, а без Cloudflare их имена не заказываются (`relays[].spa.versions` появляется, когда `rayspa`
-  relay сказал, что берёт v3).
+  клиенты стучатся к ним v2, а без Cloudflare их имена не заказываются (`relays[].spa.versions` появляется,
+  когда `rayspa` relay сказал, что берёт v3).
 - **Машины администраторов:** прежний `rayctl` работает, но не знает новых команд (шаг 6).
 
 **Шаг 1. Резервная копия.** На ноде, от root:
@@ -4168,7 +4169,8 @@ Relay, который должен остаться на своей версии
 rayctl status
 ```
 
-`version` — `v0.35.1`, строк `FAILED` нет; строки `node WARNING` — §6.2. С naive — строка `naive <сервис>` с именем и строка `naive-names` (§6.2).
+`version` — `v0.35.1`, строк `FAILED` нет; строки `node WARNING` — §6.2. С naive — строка `naive <сервис>` с
+именем и строка `naive-names` (§6.2).
 
 ```bash
 rayctl update status
