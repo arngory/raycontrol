@@ -1008,6 +1008,15 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
+	case svc.Kind == "yggdrasil" && key == "pq":
+		// ironwood's hybrid post-quantum sessions (niko-server v0.19.0,
+		// options.pq): answer by default, the node starting none itself;
+		// on starts them too, off keeps the classic ones only. Clients
+		// without them reach the node in every mode.
+		if !slices.Contains(yggdrasilPQModes, value) {
+			return svc, fmt.Errorf("%w pq: off, answer or on (%s unless set)", store.ErrInvalid, YggdrasilPQDefault)
+		}
+		v = value
 	case svc.Kind == "yggdrasil" && key == "lan_relay":
 		// The ceiling of LAN traffic through the node (lan-v1 §4.4), Mbit/s
 		// a user, its bytes in the traffic limit; 0: the devices meet
@@ -1077,7 +1086,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp, udp, rotate_sni; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp, udp, rotate_sni; yggdrasil: peers, lan_relay, pq; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -1143,6 +1152,26 @@ func LANRelaySet(s store.Service) (int, bool) {
 		return LANRelayDefault, false
 	}
 	return *st.Relay, true
+}
+
+// YggdrasilPQDefault is a Yggdrasil service's PQ sessions mode unless set
+// (decision of the owner, 2026-11-22): the node answers the PQ sessions
+// clients start and starts none itself; Niko starts them (on).
+const YggdrasilPQDefault = "answer"
+
+var yggdrasilPQModes = []string{"off", "answer", "on"}
+
+// YggdrasilPQ is a Yggdrasil service's PQ sessions mode (rayctl service set
+// NAME pq=off|answer|on): niko-server's options.pq. YggdrasilPQDefault
+// unless set, or set to what it does not know.
+func YggdrasilPQ(s store.Service) string {
+	var st struct {
+		PQ string `json:"pq"`
+	}
+	if json.Unmarshal([]byte(s.Settings), &st) != nil || !slices.Contains(yggdrasilPQModes, st.PQ) {
+		return YggdrasilPQDefault
+	}
+	return st.PQ
 }
 
 // MaxYggdrasilPeers bounds the public peers of a Yggdrasil service.

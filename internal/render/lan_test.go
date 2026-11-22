@@ -3,6 +3,7 @@ package render_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -252,5 +253,39 @@ func TestYggdrasilLANRelay(t *testing.T) {
 	}
 	if got := provision.LANRelay(store.Service{Settings: `{"lan_relay":-3}`}); got != provision.LANRelayDefault {
 		t.Errorf("a negative one: %d", got)
+	}
+}
+
+// pq (niko-server v0.19.0, options.pq): written always, answer unless set;
+// off, answer and on as set; anything else refused, and the setting left.
+func TestYggdrasilPQ(t *testing.T) {
+	ctx := context.Background()
+	st := yggNode(t)
+	pq := func() any {
+		t.Helper()
+		_, _, backend := yggFiles(t, st, time.Time{})
+		return backend["options"].(map[string]any)["pq"]
+	}
+	if v := pq(); v != "answer" {
+		t.Fatalf("by default: %v", v)
+	}
+	for _, mode := range []string{"on", "off", "answer"} {
+		if _, err := provision.SetServiceOption(ctx, st, "ygg", "pq", mode); err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		if v := pq(); v != mode {
+			t.Errorf("pq=%s: %v", mode, v)
+		}
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "ygg", "pq", "on"); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"yes", "ON", "", "answer-only"} {
+		if _, err := provision.SetServiceOption(ctx, st, "ygg", "pq", bad); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("pq=%q: %v", bad, err)
+		}
+	}
+	if v := pq(); v != "on" {
+		t.Errorf("after the refused ones: %v", v)
 	}
 }
