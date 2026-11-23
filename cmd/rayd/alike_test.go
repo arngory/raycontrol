@@ -68,7 +68,13 @@ var dateLine = regexp.MustCompile(`(?m)^Date: .*\r\n`)
 // without the Date.
 func h1(t *testing.T, addr, request string) string {
 	t.Helper()
-	c, err := tls.Dial("tcp", addr, naiveClientTLS("http/1.1"))
+	return h1With(t, addr, naiveClientTLS("http/1.1"), request)
+}
+
+// h1With is h1 over a handshake of conf.
+func h1With(t *testing.T, addr string, conf *tls.Config, request string) string {
+	t.Helper()
+	c, err := tls.Dial("tcp", addr, conf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +106,9 @@ func h2Answer(t *testing.T, tr http.RoundTripper, req *http.Request) string {
 	return fmt.Sprintf("%s %s %q", resp.Status, h, body)
 }
 
-// handshake is how a TLS handshake with conf ends: the version and the
-// protocol taken, or the server's alert ("refused remote error: tls: ...").
+// handshake is how a TLS handshake with conf ends: the version, the
+// protocol and the group taken, or the server's alert ("refused remote
+// error: tls: ...").
 func handshake(addr string, conf *tls.Config) string {
 	c, err := tls.Dial("tcp", addr, conf)
 	if err != nil {
@@ -109,15 +116,17 @@ func handshake(addr string, conf *tls.Config) string {
 	}
 	defer c.Close()
 	s := c.ConnectionState()
-	return fmt.Sprintf("%s %q", tls.VersionName(s.Version), s.NegotiatedProtocol)
+	return fmt.Sprintf("%s %q %s", tls.VersionName(s.Version), s.NegotiatedProtocol, s.CurveID)
 }
 
 // The three names past their first frames (TestNamesLookAlike has those):
 // whatever one without a password or a token can provoke of them, over
 // TLS, HTTP/2 and HTTP/1.1, for each answer of the site's but its pages.
-// What must differ is pinned too, so that a change of it is seen: naive
-// and DoH take TLS 1.3 with X25519MLKEM768 only, the site whatever a
-// browser of the last years offers (docs/design/traffic.md, "Одно лицо").
+// The handshakes too: since v0.36.1 naive and DoH take what the site
+// takes, TLS 1.2 and classical groups as well, and answer a request over
+// them as the site does, a CONNECT with the right password too
+// (TestPostQuantumOnly; docs/design/traffic.md, "Одно лицо"). Before, they
+// refused them and the site did not.
 func TestNamesAlikeBeyondFirstFrames(t *testing.T) {
 	if (&naive.Server{}).HTTPServer().IdleTimeout != site.IdleTimeout ||
 		dohHTTPServer(noTokens(), nil, slog.New(slog.DiscardHandler)).IdleTimeout != site.IdleTimeout {
@@ -159,27 +168,32 @@ func TestNamesAlikeBeyondFirstFrames(t *testing.T) {
 				return handshake(addr, naiveClientTLS("http/1.1", "h2"))
 			},
 		}
+		for probe, conf := range classicalTLS("h2") {
+			probes[probe+", handshake"] = func(addr string) string { return handshake(addr, conf) }
+			probes[probe+", h2 CONNECT with the password"] = func(addr string) string {
+				ctr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: conf}
+				defer ctr.CloseIdleConnections()
+				req, _ := naiveConnect(context.Background(), t, "https://"+addr, "192.0.2.1:443")
+				return h2Answer(t, ctr, req)
+			}
+			probes[probe+", h1 GET /"] = func(addr string) string {
+				c := conf.Clone()
+				c.NextProtos = []string{"http/1.1"}
+				return h1With(t, addr, c, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+			}
+		}
+		probes["TLS 1.2, ECDHE-ECDSA-AES128-GCM only, handshake"] = func(addr string) string {
+			return handshake(addr, &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12, //nolint:gosec // G402: a probe
+				CipherSuites: []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256}, NextProtos: []string{"h2"}})
+		}
 		for probe, f := range probes {
 			want := f(names["site"])
+			if strings.HasSuffix(probe, ", handshake") && strings.HasPrefix(want, "refused") {
+				t.Errorf("%s, %s: the site refuses it: %s", mode, probe, want)
+			}
 			for _, name := range []string{"naive", "DoH"} {
 				if got := f(names[name]); got != want {
 					t.Errorf("%s, %s: %s is told from the site:\n %s\n %s (the site)", mode, probe, name, got, want)
-				}
-			}
-		}
-		// The differences that stay: the site takes TLS 1.2 and other
-		// groups, naive and DoH refuse them.
-		for probe, conf := range map[string]*tls.Config{
-			"TLS 1.2": {InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12, NextProtos: []string{"h2"}}, //nolint:gosec // G402: a probe
-			"TLS 1.3, X25519 only": {InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, //nolint:gosec // G402: a probe
-				CurvePreferences: []tls.CurveID{tls.X25519}, NextProtos: []string{"h2"}},
-		} {
-			if got := handshake(names["site"], conf); strings.HasPrefix(got, "refused") {
-				t.Errorf("%s: the site refuses it: %s", probe, got)
-			}
-			for _, name := range []string{"naive", "DoH"} {
-				if got := handshake(names[name], conf); !strings.HasPrefix(got, "refused") {
-					t.Errorf("%s: %s takes it (%s): the difference docs/design/traffic.md names is gone, say so there", probe, name, got)
 				}
 			}
 		}

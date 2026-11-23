@@ -282,3 +282,22 @@ func TestResponder(t *testing.T) {
 
 // Routed: a routed name goes to its socket still encrypted; anything else
 // is served by the site (R2-13).
+
+// PostQuantum is X25519MLKEM768 and nothing else: not another hybrid, not a
+// classical group, not TLS 1.2, not a request without TLS.
+func TestPostQuantum(t *testing.T) {
+	for cs, want := range map[*tls.ConnectionState]bool{
+		{Version: tls.VersionTLS13, CurveID: tls.X25519MLKEM768}:    true,
+		{Version: tls.VersionTLS13, CurveID: tls.SecP256r1MLKEM768}: false,
+		{Version: tls.VersionTLS13, CurveID: tls.X25519}:            false,
+		{Version: tls.VersionTLS12, CurveID: tls.CurveP256}:         false,
+		{Version: tls.VersionTLS13}:                                 false,
+		nil:                                                         false,
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.TLS = cs
+		if got := PostQuantum(r); got != want {
+			t.Errorf("%+v: %v, want %v", cs, got, want)
+		}
+	}
+}

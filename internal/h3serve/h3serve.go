@@ -209,9 +209,13 @@ func headerRead(h http.Handler) http.Handler {
 	})
 }
 
-// Serve serves h on QUIC over pc until ctx ends: TLS 1.3 with
-// X25519MLKEM768 only, ALPN h3, the certificate cert gives at each
-// handshake (certfile.Holder).
+// Serve serves h on QUIC over pc until ctx ends: TLS 1.3 (QUIC has no
+// other) with Go's groups, X25519MLKEM768 first, as the site's TLS has
+// them (site.TLSConfigFor), ALPN h3, the certificate cert gives at each
+// handshake (certfile.Holder). Which requests need X25519MLKEM768 is h's
+// to say (site.PostQuantum): before raycontrol v0.36.1 the handshake took
+// no other group, and a probe without ML-KEM told the QUIC names from the
+// site's name over TCP by the refusal.
 func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o Options) error {
 	if o.ConnIDs != nil && o.ConnIDs.ConnectionIDLen() != ConnIDLen {
 		// Shorter IDs would make the table of stateless reset tokens
@@ -221,8 +225,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 	if a, ok := o.ConnIDs.(interface{ Ahead([]byte) bool }); ok {
 		pc = &aheadConn{PacketConn: pc, ahead: a.Ahead}
 	}
-	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
-		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
+	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: cert})
 	tr := &quic.Transport{Conn: pc, StatelessResetKey: o.ResetKey, ConnectionIDLength: ConnIDLen, ConnectionIDGenerator: o.ConnIDs,
 		// Each connection's streams without a header, where its requests
 		// find them too: their contexts come from the connection's.

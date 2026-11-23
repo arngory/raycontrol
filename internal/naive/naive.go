@@ -1,7 +1,9 @@
 // Package naive serves NaiveProxy over HTTP/2 for the node's clients
 // (docs/decisions.md, R2-14): an authenticated CONNECT with naive's
 // padding opens a tunnel; anything else gets the site's answer, never 407.
-// TLS (1.3, X25519MLKEM768 only) is the caller's.
+// TLS is the caller's, the site's (site.TLSConfigFor: a probe's handshake
+// goes as the site's does); a request over a key exchange other than
+// X25519MLKEM768 is answered as the site answers it (site.PostQuantum).
 package naive
 
 import (
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/probe"
+	"github.com/arngory/raycontrol/internal/site"
 )
 
 // Server handles the requests of one naive service.
@@ -73,6 +76,13 @@ type Server struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Not over X25519MLKEM768 (TLS 1.2, a classical group, no TLS): the
+	// site's answer, whatever the request and its password; the handshake
+	// that let it in is the site's. A tunnel is post-quantum or none.
+	if !site.PostQuantum(r) {
+		s.Answer.ServeHTTP(w, r)
+		return
+	}
 	if r.Method == http.MethodConnect && r.Proto == ConnectUDP {
 		s.serveUDP(w, r)
 		return
