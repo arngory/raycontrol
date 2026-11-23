@@ -269,6 +269,17 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
+		// Its devices go with it, and with them the sign that one knowing
+		// a hy2-obfs's S is gone (spec/salamander-device-v1.md §5).
+		var devices bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE user_id = ? AND revoked_at IS NULL)`, id).Scan(&devices); err != nil {
+			return err
+		}
+		if devices {
+			if err := closeSalamanderShared(ctx, tx, id, s.now().Unix()); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
 			return err
 		}
@@ -991,6 +1002,11 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 		}
 		now := s.now().Unix()
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
+			return err
+		}
+		// The device knew its hy2-obfs services' S in the shared window
+		// (spec/salamander-device-v1.md §5): it ends for them.
+		if err := closeSalamanderShared(ctx, tx, user, now); err != nil {
 			return err
 		}
 		if !overlap {

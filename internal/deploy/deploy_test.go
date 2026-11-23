@@ -710,6 +710,40 @@ func TestBuildHysteria(t *testing.T) {
 	}
 }
 
+// From niko-server v0.19.3 the front takes salamander off with the
+// devices' passwords, a file of its own it rereads in place
+// (spec/salamander-device-v1.md §4): hy2-obfs's backend gets no password
+// copied in, nor the front one.
+func TestBuildHysteriaSalamanderDevice(t *testing.T) {
+	defer render.UseNikoServer("v0.19.3")()
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2-obfs", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := build(m, files, render.DefaultPaths)
+	obfs, front := file(p, "/etc/systemd/system/niko-hy2-obfs.service"), file(p, "/etc/systemd/system/niko-front.service")
+	if !strings.Contains(obfs, "/run/niko/hy2-obfs/key.pem") || strings.Contains(obfs, "salamander") {
+		t.Errorf("hy2-obfs's unit:\n%s", obfs)
+	}
+	if strings.Contains(front, "salamander") || !strings.Contains(front, "ExecStart=") {
+		t.Errorf("front's unit:\n%s", front)
+	}
+}
+
 func TestBuildNaive(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))

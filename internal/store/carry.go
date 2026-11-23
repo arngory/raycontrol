@@ -46,7 +46,9 @@ const settingSPAParams = "spa_params"
 //     removed, and a relay's certificate, SPA, SSH access, probe endpoint
 //     and users stay as now;
 //   - the settings named in keep (the admin addresses, the node's own
-//     name, the relays' names) take current's value.
+//     name, the relays' names) take current's value, and so does
+//     hy2-obfs's shared window when saved has the same one
+//     (carrySalamanderShared).
 //
 // And credentials do not go back: every credential saved and current both
 // have, of the same user and the same service, takes current's values
@@ -272,6 +274,9 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 			return err
 		}
 	}
+	if err := carrySalamanderShared(ctx, tx, false); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -391,7 +396,8 @@ func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried
 //     revoked with overlap too, its rotation in flight or not (renewAdded).
 //
 // The renewals keep DoH's secrets only where saved can have no shared DoH
-// token (carryKeepsDoH). Each change has an audit line in saved
+// token (carryKeepsDoH). hy2-obfs's shared window is current's
+// (carrySalamanderShared). Each change has an audit line in saved
 // (user.renew:restore, device.revoke:restore, user.carry:restore).
 //
 // A current database of another node (a new host) has none of the
@@ -551,6 +557,9 @@ func CarryRestore(ctx context.Context, saved, current, made string) (Restored, e
 		return r, err
 	}
 	if r.Unknown, err = unknownDevices(ctx, tx, false); err != nil {
+		return r, err
+	}
+	if err := carrySalamanderShared(ctx, tx, true); err != nil {
 		return r, err
 	}
 	return r, tx.Commit()

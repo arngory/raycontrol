@@ -992,6 +992,23 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 		}
 		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "seal", PrevUntil: state.PrevUntil, Kind: "dnstt"}), nil
 	}
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "hy2-obfs" && render.SalamanderDevice() {
+		// spec/salamander-device-v1.md §3: the next S in subscriptions and
+		// accepted from now, its switch a lead away, the current one for
+		// the grace after; with now, the new one at once and nothing kept.
+		state, err := provision.RotateObfsPassword(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
+		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+			return nil, err
+		}
+		if s.Rotate != nil {
+			s.Rotate()
+		}
+		r := &nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Kind: "hy2-obfs"}
+		if state.NextFrom != 0 {
+			r.SwitchAt, r.PrevUntil = state.NextFrom, state.NextFrom+int64(s.CredGrace/time.Second)
+		}
+		return connect.NewResponse(r), nil
+	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {
 		at = now

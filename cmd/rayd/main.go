@@ -974,6 +974,15 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 		} else if n > 0 {
 			notify()
 		}
+		// hy2-obfs's S at its switch, and the previous one past its grace
+		// (spec/salamander-device-v1.md §3): the front's lists change.
+		if render.SalamanderDevice() {
+			if n, err := provision.AdvanceObfs(ctx, st, time.Now(), e.Grace, log); err != nil {
+				log.Error("hy2-obfs password rotation", "err", err)
+			} else if n > 0 {
+				notify()
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return

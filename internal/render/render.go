@@ -4,6 +4,7 @@
 package render
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/mlkem"
@@ -161,6 +162,12 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// Salamander maps a hy2-obfs service to the salamander passwords its
+	// front route accepts (spec/salamander-device-v1.md §4.1), sorted:
+	// each allowed device's of each S the service accepts, and S itself
+	// in the shared window (§5). Only CollectForRender fills it, and only
+	// with SalamanderDevice.
+	Salamander map[int64][]string
 	// FrontCopies says whether the front's installed unit copies in the
 	// credential at a path (deploy.UnitCopies); nil: it copies in all the
 	// render names (rayctl apply, which writes the unit with the render,
@@ -435,7 +442,61 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 		}
 		m.DNSAuth[svc.ID] = lines
 	}
+	if SalamanderDevice() {
+		if err := collectSalamander(ctx, st, &m, devices, time.Now()); err != nil {
+			return m, err
+		}
+	}
 	return m, collectDevices(ctx, st, &m)
+}
+
+// collectSalamander fills Model.Salamander: for each hy2-obfs service, the
+// passwords of the devices allowed on it (store.SPADevices, as the DNS
+// tunnels' keys: a device revoked, a user disabled, expired or without the
+// service is not there) for each S it accepts at now
+// (provision.ObfsSecrets), and the current and previous S themselves
+// while its shared window is open (store.SalamanderShared). devices are
+// the SPA devices if read already.
+func collectSalamander(ctx context.Context, st *store.Store, m *Model, devices []spa.Device, now time.Time) error {
+	for _, svc := range m.Services {
+		if svc.Kind != "hy2-obfs" {
+			continue
+		}
+		if devices == nil {
+			var err error
+			if devices, err = st.SPADevices(ctx); err != nil {
+				return err
+			}
+			if devices == nil {
+				devices = []spa.Device{}
+			}
+		}
+		shared, err := st.SalamanderShared(ctx, svc.ID, now)
+		if err != nil {
+			return err
+		}
+		set := map[string]bool{}
+		secrets := provision.ObfsSecrets(svc.Service, svc.Secrets, now)
+		for i, secret := range secrets {
+			if len(secret) == 0 {
+				continue
+			}
+			for _, d := range devices {
+				if slices.Contains(d.Allowed, uint16(svc.ID)) { //nolint:gosec // G115: service IDs fit (CHECK)
+					set[store.SalamanderDevicePassword(string(secret), d.Key[:])] = true
+				}
+			}
+			// The next S was never in a link: none holds it alone.
+			if shared && (i == 0 || !bytes.Equal(secret, svc.Secrets[provision.NextSecret(provision.SecretObfsPassword)])) {
+				set[string(secret)] = true
+			}
+		}
+		if m.Salamander == nil {
+			m.Salamander = map[int64][]string{}
+		}
+		m.Salamander[svc.ID] = slices.Sorted(maps.Keys(set))
+	}
+	return nil
 }
 
 // CollectYggdrasil is Collect plus the devices of the Yggdrasil users file
@@ -659,7 +720,10 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	type udpRoute struct {
 		SNI                    []string `json:"sni,omitempty"`
 		SalamanderPasswordFile string   `json:"salamander_password_file,omitempty"`
-		Backend                string   `json:"backend"`
+		// SalamanderPasswordsFile: the devices' passwords, which the front
+		// rereads (niko-server v0.19.3, spec/salamander-device-v1.md §4.2).
+		SalamanderPasswordsFile string `json:"salamander_passwords_file,omitempty"`
+		Backend                 string `json:"backend"`
 	}
 	var udpRoutes []udpRoute
 	var zones []route
@@ -826,6 +890,22 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			fs, err := hysteriaFiles(s, m, p)
 			if err != nil {
 				return err
+			}
+			if s.Kind == "hy2-obfs" && SalamanderDevice() {
+				// The devices' passwords, in a file of the front's that it
+				// rereads (spec/salamander-device-v1.md §4.2): no copy of a
+				// credential, so nothing to wait for. An empty list lets
+				// nobody in, so one never collected is no list.
+				keys, ok := m.Salamander[s.ID]
+				if !ok {
+					return errors.New("salamander passwords not collected (render.CollectForRender)")
+				}
+				f := frontSalamanderFile(s, p, keys)
+				files = append(files, fs...)
+				files = append(files, f)
+				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID), CIDLabel: label(s)}
+				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordsFile: f.Path, Backend: s.Name})
+				return nil
 			}
 			if s.Kind == "hy2-obfs" && m.FrontCopies != nil && !m.FrontCopies(p.FrontSalamander(s.Name)) {
 				// Its files are written: rayctl apply's unit copies the
@@ -1203,6 +1283,11 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	case "hy2-masq", "hy2-obfs":
 		b, err := hysteriaUsers(m, s)
 		add(HysteriaUsers, b, err)
+		if keys, ok := m.Salamander[s.ID]; ok && s.Kind == "hy2-obfs" && SalamanderDevice() {
+			f := frontSalamanderFile(s, p, keys)
+			f.Refresh = true
+			out = append(out, f)
+		}
 	case "naive":
 		b, err := naiveUsers(m, s)
 		add(NaiveUsers, b, err)
@@ -1234,6 +1319,25 @@ func frontAuthFile(s Service, p Paths, authKeys []string) File {
 	f := dnsAuthFile(s, p, authKeys)
 	f.Path, f.Group, f.Service = p.FrontAuthKeys(s.Name), GroupName("front"), "front"
 	return f
+}
+
+// frontSalamanderFile is a hy2-obfs service's salamander passwords, one a
+// line, which the front opens and closes its datagrams with and rereads
+// by itself (niko-server v0.19.3, spec/salamander-device-v1.md §4.2): in
+// the front's directory, of its group, as slipstream's keys.
+func frontSalamanderFile(s Service, p Paths, passwords []string) File {
+	var b strings.Builder
+	for _, pw := range passwords {
+		b.WriteString(pw + "\n")
+	}
+	return File{Path: p.FrontSalamanderKeys(s.Name), Mode: 0o640, Group: GroupName("front"), Content: []byte(b.String()),
+		Service: "front", Reload: true}
+}
+
+// FrontSalamanderKeys is where the front reads a hy2-obfs service's
+// salamander passwords (SalamanderDevice).
+func (p Paths) FrontSalamanderKeys(service string) string {
+	return path.Join(p.Rendered, "front", service+".salamander.keys")
 }
 
 // FrontAuthKeys is where the front reads a slipstream service's device
@@ -1970,7 +2074,14 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 				Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name})
 		}
 	}
-	if s.Kind == "hy2-obfs" {
+	switch {
+	case s.Kind == "hy2-obfs" && SalamanderDevice():
+		// The front takes salamander off and puts it on (its list of the
+		// devices' passwords, frontSalamanderFile): the backend has no
+		// password, and sizes its packets for the front's 8 bytes of salt
+		// (spec/salamander-device-v1.md §4).
+		options["salamander_front"] = true
+	case s.Kind == "hy2-obfs":
 		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
 		pw := s.Secrets[provision.SecretObfsPassword]
 		files = append(files,
@@ -2165,6 +2276,18 @@ const NaiveQUICCID = "quic-cid"
 // v0.18.0 notes). An older one refuses them, and the whole config with
 // them.
 var NikoCIDRouteFrom = [3]int{0, 18, 0}
+
+// NikoSalamanderDeviceFrom is the first niko-server whose front takes
+// salamander off and puts it on itself, with a list of passwords a route
+// that it rereads (udp.routes[].salamander_passwords_file), and whose
+// hy2-obfs backend runs behind it without one (options.salamander_front;
+// spec/salamander-device-v1.md §4). From it each device has its own
+// password (store.SalamanderDevicePassword); before, S is every client's.
+var NikoSalamanderDeviceFrom = [3]int{0, 19, 3}
+
+// SalamanderDevice reports whether hy2-obfs's passwords are the devices'
+// (NikoSalamanderDeviceFrom).
+func SalamanderDevice() bool { return NikoServerAtLeast(NikoSalamanderDeviceFrom) }
 
 // CIDLabel is the label of a service's QUIC connection IDs: its ID, which
 // no other service has; 0, none, for an ID past 16 bits (such a service's

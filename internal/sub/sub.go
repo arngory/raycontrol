@@ -344,9 +344,11 @@ func CheckAuth(header string, deviceKey [spa.KeySize]byte, now time.Time) bool {
 func Profiles(m render.Model, u render.User) ([]Profile, error) { return DeviceProfiles(m, u, nil) }
 
 // DeviceProfiles are the profiles of a user's device, given by its SPA key:
-// links that differ by device (Yggdrasil's key, DoH's token) are that
-// device's. Without a device they are the user's (rayctl user export),
-// and there is no DoH: its token is a device's alone (R4-37).
+// links that differ by device (Yggdrasil's key, DoH's token, hy2-obfs's
+// salamander password from niko-server v0.19.3) are that device's.
+// Without a device they are the user's (rayctl user export), and there is
+// no DoH: its token is a device's alone (R4-37); nor hy2-obfs, whose
+// password is then the device's too (spec/salamander-device-v1.md §2).
 func DeviceProfiles(m render.Model, u render.User, device []byte) ([]Profile, error) {
 	var inner *render.Service
 	for i := range m.Services {
@@ -584,6 +586,9 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 		if password == "" {
 			return nil, nil
 		}
+		if s.Kind == "hy2-obfs" && render.SalamanderDevice() {
+			return obfsProfile(m, u, s, password, device), nil
+		}
 		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: HysteriaLink(m, s, password)}
 		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
 			p.Next = &Next{Link: HysteriaLink(m, s, set.Next), From: set.NextFrom.Unix()}
@@ -623,6 +628,32 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 		}
 	}
 	return nil, nil
+}
+
+// obfsProfile is a device's hy2-obfs profile when its salamander password
+// is the device's (render.SalamanderDevice, spec/salamander-device-v1.md
+// §2): of the service's S and the device's SPA key. Without a device
+// (rayctl user export) there is none, as DoH's: the user has no password
+// of their own. One next per profile, the earliest switch: the user's
+// credential's (R4-1) or S's (§3); the next credential goes with the next
+// S when there is one, the node taking both from their publication on.
+func obfsProfile(m render.Model, u render.User, s render.Service, password string, device []byte) *Profile {
+	obfs := store.SalamanderDevicePassword(string(s.Secrets[provision.SecretObfsPassword]), device)
+	if obfs == "" {
+		return nil
+	}
+	p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: hysteriaLink(m, s, password, obfs)}
+	set := m.Sets[s.ID][u.ID]
+	if set.Next != "" {
+		p.Next = &Next{Link: hysteriaLink(m, s, set.Next, obfs), From: set.NextFrom.Unix()}
+	}
+	if next, from, ok := provision.ObfsNext(s.Service, s.Secrets); ok && (p.Next == nil || from.Unix() <= p.Next.From) {
+		if set.Next != "" {
+			password = set.Next
+		}
+		p.Next = &Next{Link: hysteriaLink(m, s, password, store.SalamanderDevicePassword(string(next), device)), From: from.Unix()}
+	}
+	return &p
 }
 
 // YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):
@@ -795,8 +826,13 @@ func naiveLink(m render.Model, s render.Service, password, sni string) string {
 
 // HysteriaLink is the share link of a Hysteria2 service with a user's
 // password (spec/subscription-v1.md §4): the standard hysteria2:// form,
-// salamander for hy2-obfs, and the Niko parameters.
+// salamander for hy2-obfs with the service's S, and the Niko parameters.
 func HysteriaLink(m render.Model, s render.Service, password string) string {
+	return hysteriaLink(m, s, password, string(s.Secrets[provision.SecretObfsPassword]))
+}
+
+// hysteriaLink is HysteriaLink with obfs as hy2-obfs's salamander password.
+func hysteriaLink(m render.Model, s render.Service, password, obfs string) string {
 	var st struct {
 		SNI string `json:"sni"`
 	}
@@ -815,7 +851,7 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	// has one (RAYCONTROL.md §22), and the certificate is checked anyway.
 	if s.Kind == "hy2-obfs" {
 		q.Set("obfs", "salamander")
-		q.Set("obfs-password", string(s.Secrets[provision.SecretObfsPassword]))
+		q.Set("obfs-password", obfs)
 		// A self-signed certificate: Niko pins its key (niko-pin), other
 		// clients its hash (pinSHA256).
 		cert := s.Secrets[provision.SecretTLSCert]
