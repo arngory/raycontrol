@@ -91,7 +91,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             only; rotate always switches);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply),
                                             lan_relay=N (LAN through the node, Mbit/s a user, 20 unless set;
-                                            0: in one Wi-Fi only);
+                                            0: in one Wi-Fi only), pq=off|answer|on (post-quantum
+                                            sessions; answer unless set: the node starts none);
                                             dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
