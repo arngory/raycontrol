@@ -318,8 +318,8 @@ v0.34.0 (2026-11-19) — integrations-v1 этапы 1–3 и names-v1 (R4-49). �
   ironwood форка, ветка `pq-sessions`, после ревью; niko-server с полем режима — выпуск v0.19.0 (предварительно).
 - **Длина зоны DNS-туннелей** (решение владельца 2026-11-22, v0.36.0): при создании нода отказывает, пределы явные —
   [`spec/dns-zone-length-v1.md`](spec/dns-zone-length-v1.md). dnstt 72, slipstream 20, masterdns 116; с минимумом
-  Niko 1.66 — dnstt 120 и slipstream 29. Основа — 20 символов: работает везде. slipstream до ~120 — после правки
-  порога Initial в picoquic (форк picoquic — разбор идёт).
+  Niko 1.66 — dnstt 120 и slipstream 29. Основа — 20 символов: работает везде. С минимумом Niko 1.67 —
+  slipstream до 134 (server-v0.3.0 на picoquic из arngory/picoquic, Initial от 64 байт; arngory/raycontrol#86).
 - **PQ в Niko** (решение владельца 2026-11-22): Niko начинает PQ сам («on»), узел — «только в ответ»; в Niko 1.66.
 - **Hysteria2 и 443** (решение владельца 2026-11-22, срок не назначен): всё, что маскируется под HTTP/3 на 443
   (hy2-masq, naive-quic, DoH3), стук открывает на 443 для адреса клиента, без ротации на порт слота (spa-v2 §11);
