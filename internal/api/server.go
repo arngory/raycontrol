@@ -463,8 +463,43 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		if names, err := provision.RelayNames(ctx, s.Store); err == nil {
 			resp.Warnings = append(resp.Warnings, provision.RelayNameWarnings(names)...)
 		}
+		if render.SalamanderDevice() {
+			if devices, err := s.Store.SPADevices(ctx); err == nil {
+				resp.Warnings = append(resp.Warnings, salamanderListWarnings(services, devices)...)
+			}
+		}
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// salamanderListMax is the most lines the front takes in a hy2-obfs
+// service's list of passwords (niko-server's): past it the front keeps the
+// list it had, revocations included in nothing (salamander-device-v1 §4.2).
+const salamanderListMax = 65536
+
+// salamanderListWarnings are the hy2-obfs services whose list of the
+// devices' passwords could pass salamanderListMax: a line a device allowed
+// on the service for each S the service takes, up to three in a rotation
+// (current, next, previous), and S itself in the shared window. Warned from
+// nine tenths of the most, before a rotation would take it past.
+func salamanderListWarnings(services []store.Service, devices []spa.Device) []string {
+	var out []string
+	for _, svc := range services {
+		if svc.Kind != "hy2-obfs" || !svc.Enabled {
+			continue
+		}
+		n := 0
+		for _, d := range devices {
+			if slices.Contains(d.Allowed, uint16(svc.ID)) { //nolint:gosec // G115: service IDs fit (CHECK)
+				n++
+			}
+		}
+		if lines := 3*n + 2; lines > salamanderListMax*9/10 {
+			out = append(out, fmt.Sprintf("service %s (hy2-obfs): %d devices, up to %d lines in the front's list of salamander passwords in a rotation; past %d the front keeps its old list and revocations stop reaching it (salamander-device-v1 §4.2): spread the users over another hy2-obfs service",
+				svc.Name, n, lines, salamanderListMax))
+		}
+	}
+	return out
 }
 
 // brutalWarnings are the enabled Hysteria2 services whose Brutal has no
