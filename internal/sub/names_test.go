@@ -21,8 +21,11 @@ import (
 // Links by name (spec/names-v1.md §4): to a client that resolves names,
 // each link's host is the name it sends as SNI when that is one label
 // under the node's domain, the node's own name otherwise, and niko-ip
-// has the node's address; to the others, the address as before.
+// has the node's address; to the others, the address as before. For the
+// niko-server before v0.19.3: from it a user's export has no hy2-obfs line
+// (salamander-device-v1), and hy2-obfs's host is what is checked here.
 func TestLinksByName(t *testing.T) {
+	defer render.UseNikoServer("v0.19.2")()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {

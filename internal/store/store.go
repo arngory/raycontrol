@@ -147,6 +147,7 @@ func (s *Store) migrate(ctx context.Context) error {
 var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx, now int64) error{
 	14: renewRevokedUsers,
 	15: startDoHShared,
+	20: startSalamanderShared,
 }
 
 // ErrNewerSchema: the database was migrated by a newer raycontrol.

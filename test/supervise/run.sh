@@ -81,7 +81,9 @@ echo "$out"
 [[ $out == *"channel down:"* && $out == *"channel udp: 50 sent, 50 back"* ]] || fail "channel probe: $out"
 [[ $out == *"channel link: "* ]] || fail "no link from the client's address: $out"
 links="$(x /opt/rc/rayctl user export alice)"
-[[ $(grep -c '^vless://' <<<"$links") -ge 1 && $(grep -c '^hysteria2://' <<<"$links") == 1 ]] || fail "links: $links"
+# hy2-obfs's salamander password is a device's (salamander-device-v1): the
+# export has no line of it, the device's subscription above has.
+[[ $(grep -c '^vless://' <<<"$links") -ge 1 && $(grep -c '^hysteria2://' <<<"$links") == 0 ]] || fail "links: $(grep -c '' <<<"$links") lines, $(grep -c '^hysteria2://' <<<"$links") of Hysteria2"
 
 log "naive's next name (R4-42): published at once, the front unchanged; -now switches"
 # The site's certificate is a wildcard: the next name, routed since the

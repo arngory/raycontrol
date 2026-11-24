@@ -127,6 +127,49 @@ func (a *Applier) frontCopies() func(string) bool {
 	return func(path string) bool { return copies[path] }
 }
 
+// dropSharedSalamander removes, from niko-server v0.19.3 on
+// (render.SalamanderDevice), the files of before that held a hy2-obfs
+// service's own salamander password: the backend's and the front's copy.
+// The render writes neither any more (the front takes the devices'
+// passwords, salamander-device-v1 §4); left there, the service's secret
+// stayed on disk twice. Kept while an installed unit still copies one in
+// (systemd, before rayctl apply): that unit's start would fail without it.
+func (a *Applier) dropSharedSalamander(m render.Model) {
+	if !render.SalamanderDevice() {
+		return
+	}
+	units := ""
+	if a.FrontUnit != "" {
+		units = filepath.Dir(a.FrontUnit)
+	}
+	copiedIn := func(unit, cred string) bool {
+		if units == "" {
+			return false // the supervisor copies in what its own plan names
+		}
+		b, err := os.ReadFile(filepath.Join(units, unit)) //nolint:gosec // G304: an installed unit of the plan
+		return err == nil && deploy.UnitCopies(b)[cred]
+	}
+	for _, s := range m.Services {
+		if s.Kind != "hy2-obfs" {
+			continue
+		}
+		for _, c := range []struct{ file, cred, unit string }{
+			{filepath.Join(a.Paths.Rendered, s.Name, render.HysteriaObfs), a.Paths.Credential(s.Name, render.HysteriaObfs), render.UnitName(s.Name)},
+			{filepath.Join(a.Paths.Rendered, "front", s.Name+".salamander"), a.Paths.FrontSalamander(s.Name), render.UnitName("front")},
+		} {
+			if copiedIn(c.unit, c.cred) {
+				continue
+			}
+			switch err := os.Remove(c.file); {
+			case err == nil:
+				a.Log.Info("the service's own salamander password removed from disk", "service", s.Name, "file", c.file)
+			case !errors.Is(err, os.ErrNotExist):
+				a.Log.Warn("the service's own salamander password left on disk", "service", s.Name, "file", c.file, "err", err)
+			}
+		}
+	}
+}
+
 func (a *Applier) pendingDir() string {
 	if a.Pending != "" {
 		return a.Pending
@@ -350,6 +393,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("service front: %s: %w", a.Paths.FrontConfig(), err))
 		}
 	}
+	a.dropSharedSalamander(m)
 
 	// What to restart: the services whose files changed, and those owed a
 	// restart from an apply that did not get to it.

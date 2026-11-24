@@ -67,6 +67,8 @@ func TestBuildFromInputs(t *testing.T) {
 		tweak    func(context.Context, *store.Store)
 		// drop: files left out, as of a service that failed to render.
 		drop func(render.File) bool
+		// tag: the niko-server rendered for, if not the pinned one.
+		tag string
 	}
 	for name, c := range map[string]model{
 		"TestBuild":              {p: render.DefaultPaths, services: plan2Services},
@@ -94,8 +96,12 @@ func TestBuildFromInputs(t *testing.T) {
 			drop: func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" }},
 		"TestFrontCredentialsOnlyRendered": {p: render.DefaultPaths, services: plan2Services,
 			drop: func(f render.File) bool { return f.Path == "/var/lib/raycontrol/rendered/front/dnsprobe.key" }},
+		// One password for the service, before niko-server v0.19.3
+		// (salamander-device-v1): copied in for the front and the backend.
+		"TestBuildHysteria, niko-server v0.19.2": {p: render.DefaultPaths, services: [][3]string{{"hy2-masq", "hy2-masq", ""}, {"hy2-obfs", "hy2-obfs", ""}},
+			tag: "v0.19.2"},
 		"salamander not rendered": {p: render.DefaultPaths, services: [][3]string{{"hy2-obfs", "h", ""}},
-			drop: func(f render.File) bool { return f.Path == "/var/lib/raycontrol/rendered/front/h.salamander" }},
+			drop: func(f render.File) bool { return f.Path == "/var/lib/raycontrol/rendered/front/h.salamander" }, tag: "v0.19.2"},
 		"TestProbeKeyBeforeDNSTT": {p: render.DefaultPaths, services: [][3]string{{"masterdns", "mdns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}}},
 		"TestBuildSlipstream":     {p: render.DefaultPaths, services: [][3]string{{"slipstream", "slip", ""}}},
 		"slipstream, broken": {p: render.DefaultPaths, services: [][3]string{{"slipstream", "slip", ""}, {"olcrtc", "olc", ""}},
@@ -111,6 +117,10 @@ func TestBuildFromInputs(t *testing.T) {
 		"REALITY on TCP 443": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", `{"target":"www.example.org:443"}`}}},
 		"no services":        {p: render.DefaultPaths},
 	} {
+		restore := func() {}
+		if c.tag != "" {
+			restore = render.UseNikoServer(c.tag)
+		}
 		m, files := buildModel(t, c.p, c.services, c.tweak)
 		if c.drop != nil {
 			n := len(files)
@@ -142,6 +152,7 @@ func TestBuildFromInputs(t *testing.T) {
 		if !reflect.DeepEqual(want, got) {
 			t.Errorf("%s: the plan from the inputs differs:\nwant %+v\ngot  %+v", name, want, got)
 		}
+		restore()
 	}
 }
 

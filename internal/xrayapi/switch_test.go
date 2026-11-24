@@ -393,9 +393,11 @@ func TestCredentialSwitchWithXray(t *testing.T) {
 }
 
 // TestCredentialSwitchWithNikoServer: the same on Hysteria2 (hy2-obfs on
-// niko-server behind its UDP front, Xray as the client), its users file
-// written as rayd does and read again on SIGHUP. Set XRAY_BIN and
-// NIKO_SERVER_BIN (v0.15.0 or later: users cut, byte counters).
+// niko-server behind its UDP front, Xray as the client with a device's
+// line: its own salamander password, which the front takes off), its
+// users file written as rayd does and read again on SIGHUP. Set XRAY_BIN
+// and NIKO_SERVER_BIN (v0.19.3 or later: the devices' passwords in the
+// front).
 func TestCredentialSwitchWithNikoServer(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
@@ -408,9 +410,23 @@ func TestCredentialSwitchWithNikoServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	st, paths, a, svc := switchNode(t, ctx, "hy2-obfs")
+	// alice's device: its hy2-obfs line has a salamander password of its
+	// own (spec/salamander-device-v1.md §2), in the front's list from the
+	// apply after its enrollment.
+	_, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx); err != nil && !render.Partial(err) {
+		t.Fatal(err)
+	}
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
+	}
+	obfs := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
+	if got, want := salamanderKeys(t, paths, svc.Name), store.SalamanderDevicePassword(string(obfs.Secrets[provision.SecretObfsPassword]), key[:]); !slices.Equal(got, []string{want}) {
+		t.Fatalf("the front's salamander passwords: %d, want the device's", len(got))
 	}
 	uid := m.Users[0].ID
 	first := m.Creds[svc.ID][uid]
@@ -425,40 +441,10 @@ func TestCredentialSwitchWithNikoServer(t *testing.T) {
 	if err := os.WriteFile(usersFile, legacy, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	copies := map[string]string{
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaKey):    paths.Credential(svc.Name, render.HysteriaKey),
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaObfs):   paths.Credential(svc.Name, render.HysteriaObfs),
-		filepath.Join(paths.Rendered, "front", svc.Name+".salamander"): paths.FrontSalamander(svc.Name),
-	}
-	for from, to := range copies {
-		b, err := os.ReadFile(from)
-		if err != nil {
-			t.Fatal(err)
-		}
-		os.MkdirAll(filepath.Dir(to), 0o755)
-		os.WriteFile(to, b, 0o600)
-	}
-	os.MkdirAll(paths.FrontDir(svc.Name), 0o755)
-	backend := startNiko(t, niko, "backend", filepath.Join(paths.Rendered, svc.Name, "backend.json"), func(cfg map[string]any) {
-		cfg["front_uid"] = os.Getuid()
-		cfg["log"] = map[string]string{"level": "info"} // the reloads' lines
-	})
-	port := freeUDP(t)
-	startNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
-		cfg["udp"].(map[string]any)["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
-		for _, ref := range cfg["backends"].(map[string]any) {
-			ref.(map[string]any)["uid"] = os.Getuid()
-		}
-		delete(cfg, "tcp")
-		delete(cfg, "dns")
-	})
-	backend.waitReload(t) // read at the start
+	backend, _, port := startObfs(t, niko, paths, svc.Name)
 
-	profiles, err := sub.Profiles(m, m.Users[0])
-	if err != nil || len(profiles) != 1 {
-		t.Fatalf("profiles %v %v", profiles, err)
-	}
-	link := strings.Replace(profiles[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+	// The device's line: its salamander password, the user's credential.
+	link := obfsLink(t, m, svc.Name, key[:], port)
 	client := func(password string) int {
 		socks, _ := hysteriaSocks(t, bin, link, password, "")
 		return socks
@@ -572,6 +558,8 @@ type nikoProc struct {
 	mu   sync.Mutex
 	logs bytes.Buffer
 	seen int // reload lines read
+	// keysSeen: the front's reads of salamander passwords (keysRead).
+	keysSeen int
 }
 
 func (p *nikoProc) Write(b []byte) (int, error) {
@@ -604,13 +592,36 @@ func (p *nikoProc) waitReload(t *testing.T) int {
 }
 
 // reload has the backend read its users file now (SIGHUP) and returns the
-// connections it closed; a closed connection is gone by then.
+// connections closed since the last reload: by this read, and by the
+// reads the backend made by itself since. It also reads the file within
+// 5 s of a change of its time, so once more after a SIGHUP's read, and
+// first when the test waits after a change. Each closed connection is
+// counted once, by the read that closed it, and is gone by then.
 func (p *nikoProc) reload(t *testing.T) int {
 	t.Helper()
+	p.mu.Lock()
+	before := len(reloadLine.FindAllStringSubmatch(p.logs.String(), -1))
+	p.mu.Unlock()
 	if err := p.cmd.Process.Signal(syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
-	return p.waitReload(t)
+	for range 100 {
+		p.mu.Lock()
+		lines := reloadLine.FindAllStringSubmatch(p.logs.String(), -1)
+		p.mu.Unlock()
+		if len(lines) > before {
+			closed := 0
+			for _, l := range lines[p.seen:] {
+				n, _ := strconv.Atoi(l[2])
+				closed += n
+			}
+			p.seen = len(lines)
+			return closed
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the backend did not read its users file on SIGHUP:\n%s", p.logs.String())
+	return 0
 }
 
 // startNiko runs a niko-server process from a rendered config, adjusted
@@ -647,4 +658,128 @@ func startNiko(t *testing.T, niko, role, rendered string, adjust func(map[string
 	})
 	time.Sleep(300 * time.Millisecond)
 	return p
+}
+
+// keysLine is the front's line at each read of a salamander passwords
+// file that changed it (niko-server v0.19.3): the file and the passwords
+// it took.
+var keysLine = regexp.MustCompile(`udp salamander passwords (\S+): (\d+)`)
+
+// keysRead waits for the front's next read of a salamander passwords file
+// that changed its list, after the ones seen (at its start, then again
+// every 5 s), and checks it took n passwords.
+func (p *nikoProc) keysRead(t *testing.T, n int) {
+	t.Helper()
+	for range 200 {
+		p.mu.Lock()
+		lines := keysLine.FindAllStringSubmatch(p.logs.String(), -1)
+		p.mu.Unlock()
+		if len(lines) > p.keysSeen {
+			l := lines[p.keysSeen]
+			p.keysSeen++
+			if got, _ := strconv.Atoi(l[2]); got != n {
+				t.Fatalf("the front took %d salamander passwords from %s, want %d", got, l[1], n)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the front did not read its salamander passwords again:\n%s", p.logs.String())
+}
+
+// salamanderKeys are the passwords of a hy2-obfs service's front list as
+// rendered (render.Paths.FrontSalamanderKeys).
+func salamanderKeys(t *testing.T, paths render.Paths, svc string) []string {
+	t.Helper()
+	b, err := os.ReadFile(paths.FrontSalamanderKeys(svc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}
+
+// startObfs runs a hy2-obfs service's backend and the UDP front from the
+// rendered files, the front on a UDP port of the test's, both logging the
+// reads of their files. From niko-server v0.19.3 (render.SalamanderDevice)
+// the front takes salamander off and puts it on with the devices'
+// passwords, which it reads in place and again every 5 s; the backend runs
+// with salamander_front and no password: the only copy of a credential
+// the units make is the TLS key's.
+func startObfs(t *testing.T, niko string, paths render.Paths, svc string) (backend, front *nikoProc, port int) {
+	t.Helper()
+	for _, old := range []string{filepath.Join(paths.Rendered, svc, render.HysteriaObfs), filepath.Join(paths.Rendered, "front", svc+".salamander")} {
+		if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a shared salamander password rendered: %s (%v)", old, err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(paths.Rendered, svc, render.HysteriaKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Dir(paths.Credential(svc, render.HysteriaKey)), 0o755)
+	os.WriteFile(paths.Credential(svc, render.HysteriaKey), b, 0o600)
+	os.MkdirAll(paths.FrontDir(svc), 0o755)
+	backend = startNiko(t, niko, "backend", filepath.Join(paths.Rendered, svc, "backend.json"), func(cfg map[string]any) {
+		options := cfg["options"].(map[string]any)
+		if options["salamander_front"] != true || options["obfs_password_file"] != nil {
+			t.Fatalf("the backend's options: %v", options)
+		}
+		cfg["front_uid"] = os.Getuid()
+		cfg["log"] = map[string]string{"level": "info"} // the reloads' lines
+	})
+	port = freeUDP(t)
+	front = startNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
+		udp := cfg["udp"].(map[string]any)
+		routes := udp["routes"].([]any)
+		if len(routes) != 1 || routes[0].(map[string]any)["salamander_passwords_file"] != paths.FrontSalamanderKeys(svc) ||
+			routes[0].(map[string]any)["salamander_password_file"] != nil {
+			t.Fatalf("the front's UDP routes: %v", routes)
+		}
+		udp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+		for _, ref := range cfg["backends"].(map[string]any) {
+			ref.(map[string]any)["uid"] = os.Getuid()
+		}
+		cfg["log"] = map[string]string{"level": "info"} // the reads of the passwords
+		delete(cfg, "tcp")
+		delete(cfg, "dns")
+	})
+	backend.waitReload(t) // read at the start
+	front.keysRead(t, len(salamanderKeys(t, paths, svc)))
+	return backend, front, port
+}
+
+// obfsLink is a device's hy2-obfs line (sub.DeviceProfiles: its own
+// salamander password), on the front's port of the test.
+func obfsLink(t *testing.T, m render.Model, svc string, device []byte, port int) string {
+	t.Helper()
+	profiles, err := sub.DeviceProfiles(m, m.Users[0], device)
+	i := slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == svc })
+	if err != nil || i < 0 {
+		t.Fatalf("profiles %v %v", profileNames(profiles), err)
+	}
+	return strings.Replace(profiles[i].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+}
+
+// profileNames are the profiles' names: their links, a password in
+// each, stay out of the test's output.
+func profileNames(ps []sub.Profile) []string {
+	var out []string
+	for _, p := range ps {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// stalled reports whether a stream fails to carry an exchange within
+// limit: cut, or its datagrams dropped on the way.
+func stalled(c net.Conn, limit time.Duration) bool {
+	c.SetDeadline(time.Now().Add(limit))
+	defer c.SetDeadline(time.Time{})
+	msg := bytes.Repeat([]byte("u"), 1000)
+	binary.BigEndian.PutUint32(msg, uint32(len(msg)))
+	if _, err := c.Write(msg); err != nil {
+		return true
+	}
+	_, err := io.ReadFull(c, make([]byte, 3*len(msg)))
+	return err != nil
 }

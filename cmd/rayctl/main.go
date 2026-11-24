@@ -122,6 +122,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             at once; the previous one accepted for -cred-grace (with
                                             -now: not at all); refused while the key before is still
                                             in its grace, unless -force (that key then goes at once);
+                                            hy2-obfs (niko-server v0.19.3 on): a new salamander secret,
+                                            the devices' passwords from it published now, the switch
+                                            after -cred-lead, the current ones accepted -cred-grace
+                                            more; -now: at once, nothing kept;
                                             a site (root): its certificate moves to the next key, the
                                             one clients already pin; refused until that key has been
                                             in subscriptions for -site-key-lead, unless -force (the
@@ -1029,6 +1033,15 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
 			case r.Msg.Seal:
 				fmt.Fprintf(w, "%s has a new %s key; the previous one is no longer accepted (its sessions closed): clients get nothing until they fetch their subscription\n", args[0], what)
+			case r.Msg.Kind == "hy2-obfs" && *now:
+				// spec/salamander-device-v1.md §3: every device's password
+				// is of the new secret.
+				fmt.Fprintf(w, "%s has a new salamander secret, and every device a new hy2-obfs password from it, at once; the\n"+
+					"previous ones are no longer accepted: devices get no hy2-obfs until they fetch their subscription\n", args[0])
+			case r.Msg.Kind == "hy2-obfs":
+				fmt.Fprintf(w, "%s switches to a new salamander secret at %s: the devices' passwords from it are in subscriptions\n"+
+					"and accepted from now, the current ones until %s\n", args[0],
+					time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339), time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
 			case r.Msg.Kind == "naive" && *now:
 				// R4-42: the next name is routed already; nothing leaked.
 				fmt.Fprintf(w, "%s moves to its next server name within a minute (under a certificate of listed names once the certificate\n"+
@@ -1144,6 +1157,22 @@ func keyState(s *nodev1.Service) string {
 	}
 	if s.Kind == "naive" {
 		return naiveNameState(s, day)
+	}
+	if s.Kind == "hy2-obfs" {
+		// Its salamander secret's rotation (spec/salamander-device-v1.md
+		// §3), once there was one: times only.
+		st := provision.ParseObfsState(store.Service{Kind: s.Kind, Settings: s.SettingsJson})
+		var out []string
+		if st.RotatedAt != 0 {
+			out = append(out, "salamander secret since "+day(st.RotatedAt))
+		}
+		if st.NextFrom != 0 {
+			out = append(out, "switch "+day(st.NextFrom))
+		}
+		if st.PrevUntil != 0 {
+			out = append(out, "previous secret until "+day(st.PrevUntil))
+		}
+		return strings.Join(out, ", ")
 	}
 	if s.Kind != "reality" {
 		return ""

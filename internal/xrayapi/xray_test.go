@@ -1032,9 +1032,14 @@ func runFront(t *testing.T, niko, rendered string, port int) (stop func()) {
 // TestHysteriaWithXray: both Hysteria2 services as rendered (R3-4), on
 // niko-server behind its UDP front: hy2-masq by the name in the QUIC
 // Initial, hy2-obfs by salamander, both on one port. An Xray client built
-// from the subscription links gets through; a wrong password does not; a
-// rotated user list is read again without a restart. Set XRAY_BIN (the
-// client) and NIKO_SERVER_BIN (v0.3 or later).
+// from a device's subscription links gets through; a wrong password does
+// not; a rotated user list is read again without a restart. hy2-obfs's
+// salamander password is the device's (spec/salamander-device-v1.md):
+// the front takes it off with the list of the devices' passwords, so the
+// user's other device gets in with its own, and the service's secret S
+// (no shared window on a node made with v0.36.1) or the password of a
+// device not enrolled does not. Set XRAY_BIN (the client) and
+// NIKO_SERVER_BIN (v0.19.3 or later).
 func TestHysteriaWithXray(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
@@ -1082,7 +1087,16 @@ func TestHysteriaWithXray(t *testing.T) {
 
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
 	st.SetUserServices(ctx, "alice", []int64{masq.ID, obfs.ID})
-	m, err := render.Collect(ctx, st)
+	// Two devices of alice's: a salamander password each.
+	_, phoneKey, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, laptopKey, err := st.CreateDevice(ctx, "alice", "laptop", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,13 +1105,28 @@ func TestHysteriaWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secret := string(m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == obfs.ID })].Secrets[provision.SecretObfsPassword])
+	pPhone, pLaptop := store.SalamanderDevicePassword(secret, phoneKey[:]), store.SalamanderDevicePassword(secret, laptopKey[:])
+	// The front's list: both devices' passwords, not S; no shared password
+	// anywhere, the backend has none.
+	for _, f := range files {
+		switch f.Path {
+		case paths.FrontSalamanderKeys("hy2o"):
+			if got := strings.Fields(string(f.Content)); len(got) != 2 || !slices.Contains(got, pPhone) || !slices.Contains(got, pLaptop) {
+				t.Fatalf("the front's salamander passwords: %d, want both devices'", len(got))
+			}
+		case filepath.Join(paths.Rendered, "hy2o", render.HysteriaObfs), filepath.Join(paths.Rendered, "front", "hy2o.salamander"):
+			t.Fatalf("a shared salamander password rendered: %s", f.Path)
+		}
+		if bytes.Contains(f.Content, []byte(secret)) {
+			t.Fatalf("S in %s", f.Path)
+		}
+	}
 	// The files as rayd writes them, and the copies the units' ExecStartPre
-	// make in the runtime directories.
+	// make in the runtime directories: the TLS keys alone.
 	copies := map[string]string{
-		filepath.Join(paths.Rendered, "hy2", render.HysteriaKey):   paths.Credential("hy2", render.HysteriaKey),
-		filepath.Join(paths.Rendered, "hy2o", render.HysteriaKey):  paths.Credential("hy2o", render.HysteriaKey),
-		filepath.Join(paths.Rendered, "hy2o", render.HysteriaObfs): paths.Credential("hy2o", render.HysteriaObfs),
-		filepath.Join(paths.Rendered, "front", "hy2o.salamander"):  paths.FrontSalamander("hy2o"),
+		filepath.Join(paths.Rendered, "hy2", render.HysteriaKey):  paths.Credential("hy2", render.HysteriaKey),
+		filepath.Join(paths.Rendered, "hy2o", render.HysteriaKey): paths.Credential("hy2o", render.HysteriaKey),
 	}
 	for _, name := range []string{"hy2", "hy2o"} {
 		os.MkdirAll(paths.FrontDir(name), 0o755) // the sockets for the front (S-1)
@@ -1113,6 +1142,9 @@ func TestHysteriaWithXray(t *testing.T) {
 	port := freeUDP(t)
 	for _, name := range []string{"hy2", "hy2o"} {
 		runNiko(t, niko, "backend", filepath.Join(paths.Rendered, name, "backend.json"), func(cfg map[string]any) {
+			if options := cfg["options"].(map[string]any); name == "hy2o" && (options["salamander_front"] != true || options["obfs_password_file"] != nil) {
+				t.Fatalf("hy2o's backend options: %v", options)
+			}
 			cfg["front_uid"] = os.Getuid()
 		})
 	}
@@ -1126,7 +1158,7 @@ func TestHysteriaWithXray(t *testing.T) {
 
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
 	defer page.Close()
-	profiles, err := sub.Profiles(m, m.Users[0])
+	profiles, err := sub.DeviceProfiles(m, m.Users[0], phoneKey[:])
 	if err != nil || len(profiles) != 2 {
 		t.Fatalf("profiles %v %v", profiles, err)
 	}
@@ -1142,6 +1174,29 @@ func TestHysteriaWithXray(t *testing.T) {
 		}
 		if err := tryHysteria(t, bin, link, "wrong", rootFile, page.URL, 3); err == nil {
 			t.Fatalf("%s: a wrong password got through", svc.Name)
+		}
+		if svc.ID == obfs.ID {
+			// The other device's line: its own password, in the front's
+			// list too. S, which was every client's password before, and
+			// the password of a device not enrolled open nothing.
+			laptops, err := sub.DeviceProfiles(m, m.Users[0], laptopKey[:])
+			i := slices.IndexFunc(laptops, func(p sub.Profile) bool { return p.Name == svc.Name })
+			if err != nil || i < 0 {
+				t.Fatalf("the laptop's profiles %v %v", profileNames(laptops), err)
+			}
+			other := strings.Replace(laptops[i].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+			if obfsOf(t, other) != pLaptop || obfsOf(t, link) != pPhone {
+				t.Fatal("the lines' salamander passwords are not the devices'")
+			}
+			if err := tryHysteria(t, bin, other, "", rootFile, page.URL, 30); err != nil {
+				t.Fatalf("%s: the other device's line: %v", svc.Name, err)
+			}
+			stranger := store.SalamanderDevicePassword(secret, bytes.Repeat([]byte{7}, 32))
+			for name, pw := range map[string]string{"S": secret, "a device not enrolled's": stranger} {
+				if err := tryHysteria(t, bin, withObfs(t, link, pw), "", rootFile, page.URL, 3); err == nil {
+					t.Fatalf("%s: %s salamander password got through", svc.Name, name)
+				}
+			}
 		}
 		// The user's bytes on the stats socket (niko-server v0.15.0,
 		// traffic-limit-v1 §2.2), as rayd's traffic loop reads them: the
@@ -1167,7 +1222,7 @@ func TestHysteriaWithXray(t *testing.T) {
 	// by itself (no restart: the file is marked Reload).
 	bob, _ := st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
 	st.SetUserServices(ctx, "bob", []int64{masq.ID})
-	if m, err = render.Collect(ctx, st); err != nil {
+	if m, err = render.CollectForRender(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	if files, _, err = render.Render(m, paths); err != nil {
@@ -1232,12 +1287,47 @@ func freeUDP(t *testing.T) int {
 	return c.LocalAddr().(*net.UDPAddr).Port
 }
 
+// obfsOf is a hysteria2:// link's salamander password.
+func obfsOf(t *testing.T, link string) string {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Query().Get("obfs-password")
+}
+
+// withObfs is a hysteria2:// link with another salamander password.
+func withObfs(t *testing.T, link, password string) string {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("obfs-password", password)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // tryHysteria runs an Xray client from a hysteria2:// link (auth replaces
-// the link's password if set), trusting root, and fetches page through it.
+// the link's password if set), trusting root, and fetches page through it
+// once the client listens: a client still starting is no refusal.
 func tryHysteria(t *testing.T, bin, link, auth, root, page string, tries int) error {
 	t.Helper()
 	socksPort, stop := hysteriaSocks(t, bin, link, auth, root)
 	defer stop()
+	for i := 0; ; i++ {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(socksPort), time.Second)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if i == 50 {
+			t.Fatalf("the client on %d does not listen: %v", socksPort, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
 	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
 	var lastErr error

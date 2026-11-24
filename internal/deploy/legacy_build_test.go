@@ -32,7 +32,10 @@ import (
 // probe key) and rayd's group come with the first service it carries,
 // not with its config only: a plan of REALITY, naive, hy2-masq or
 // Yggdrasil before their site's certificate named the front's group in
-// tmpfiles without making it, and the install failed.
+// tmpfiles without making it, and the install failed. And in both a
+// hy2-obfs backend gets no copy of the salamander password from
+// niko-server v0.19.3 on (render.SalamanderDevice): the front takes
+// salamander off with the devices' passwords.
 // Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	plan := Plan{Conntrack: true}
@@ -204,7 +207,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		dir := path.Join(p.Rendered, s.Name)
 		creds := []string{copyIn(bin.Rayd, anchor, renderedOwner,
 			g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
-		if s.Kind == "hy2-obfs" {
+		if s.Kind == "hy2-obfs" && !render.SalamanderDevice() {
 			creds = append(creds, copyIn(bin.Rayd, anchor, renderedOwner,
 				g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}

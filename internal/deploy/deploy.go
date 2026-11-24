@@ -488,7 +488,10 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		dir := path.Join(p.Rendered, s.Name)
 		creds := []string{copyIn(bin.Rayd, anchor, renderedOwner,
 			g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
-		if s.Kind == "hy2-obfs" {
+		// Its salamander password, until the front takes salamander off
+		// with the devices' own (render.SalamanderDevice): the backend then
+		// has none.
+		if s.Kind == "hy2-obfs" && !render.SalamanderDevice() {
 			creds = append(creds, copyIn(bin.Rayd, anchor, renderedOwner,
 				g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}
@@ -708,9 +711,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		}
 		// The front's credentials, copied in by root, readable by the front
 		// only: the dnsprobe-v1 key and the salamander passwords of
-		// hy2-obfs. Only what this render wrote: a service that could not
-		// be rendered leaves none, and an install of a missing file would
-		// keep the whole front down (Q-1).
+		// hy2-obfs (before render.SalamanderDevice: from it the devices'
+		// passwords are a file the front rereads in place, and the render
+		// writes no copy of one). Only what this render wrote: a service
+		// that could not be rendered leaves none, and an install of a
+		// missing file would keep the whole front down (Q-1).
 		var frontCreds []string
 		cred := func(rendered bool, src, dst string) {
 			if rendered {

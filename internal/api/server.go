@@ -463,8 +463,43 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		if names, err := provision.RelayNames(ctx, s.Store); err == nil {
 			resp.Warnings = append(resp.Warnings, provision.RelayNameWarnings(names)...)
 		}
+		if render.SalamanderDevice() {
+			if devices, err := s.Store.SPADevices(ctx); err == nil {
+				resp.Warnings = append(resp.Warnings, salamanderListWarnings(services, devices)...)
+			}
+		}
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// salamanderListMax is the most lines the front takes in a hy2-obfs
+// service's list of passwords (niko-server's): past it the front keeps the
+// list it had, revocations included in nothing (salamander-device-v1 §4.2).
+const salamanderListMax = 65536
+
+// salamanderListWarnings are the hy2-obfs services whose list of the
+// devices' passwords could pass salamanderListMax: a line a device allowed
+// on the service for each S the service takes, up to three in a rotation
+// (current, next, previous), and S itself in the shared window. Warned from
+// nine tenths of the most, before a rotation would take it past.
+func salamanderListWarnings(services []store.Service, devices []spa.Device) []string {
+	var out []string
+	for _, svc := range services {
+		if svc.Kind != "hy2-obfs" || !svc.Enabled {
+			continue
+		}
+		n := 0
+		for _, d := range devices {
+			if slices.Contains(d.Allowed, uint16(svc.ID)) { //nolint:gosec // G115: service IDs fit (CHECK)
+				n++
+			}
+		}
+		if lines := 3*n + 2; lines > salamanderListMax*9/10 {
+			out = append(out, fmt.Sprintf("service %s (hy2-obfs): %d devices, up to %d lines in the front's list of salamander passwords in a rotation; past %d the front keeps its old list and revocations stop reaching it (salamander-device-v1 §4.2): spread the users over another hy2-obfs service",
+				svc.Name, n, lines, salamanderListMax))
+		}
+	}
+	return out
 }
 
 // brutalWarnings are the enabled Hysteria2 services whose Brutal has no
@@ -991,6 +1026,23 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 			return nil, err
 		}
 		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "seal", PrevUntil: state.PrevUntil, Kind: "dnstt"}), nil
+	}
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "hy2-obfs" && render.SalamanderDevice() {
+		// spec/salamander-device-v1.md §3: the next S in subscriptions and
+		// accepted from now, its switch a lead away, the current one for
+		// the grace after; with now, the new one at once and nothing kept.
+		state, err := provision.RotateObfsPassword(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
+		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+			return nil, err
+		}
+		if s.Rotate != nil {
+			s.Rotate()
+		}
+		r := &nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Kind: "hy2-obfs"}
+		if state.NextFrom != 0 {
+			r.SwitchAt, r.PrevUntil = state.NextFrom, state.NextFrom+int64(s.CredGrace/time.Second)
+		}
+		return connect.NewResponse(r), nil
 	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {

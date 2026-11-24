@@ -213,6 +213,21 @@ func TestProbeDNSZones(t *testing.T) {
 	}
 }
 
+// rayctl service list: hy2-obfs's salamander secret's rotation
+// (spec/salamander-device-v1.md §3), times only; nothing before one.
+func TestKeyStateObfs(t *testing.T) {
+	for settings, want := range map[string]string{
+		`{"sni":"0a1b2c3d4e5f.invalid"}`:                              "",
+		`{"obfs_next_from":1800259200}`:                               "switch 2027-01-18 08:00",
+		`{"obfs_rotated_at":1800259200,"obfs_prev_until":1800432000}`: "salamander secret since 2027-01-18 08:00, previous secret until 2027-01-20 08:00",
+		`{"obfs_rotated_at":1800259200,"obfs_next_from":1800518400}`:  "salamander secret since 2027-01-18 08:00, switch 2027-01-21 08:00",
+	} {
+		if got := keyState(&nodev1.Service{Kind: "hy2-obfs", SettingsJson: settings}); got != want {
+			t.Errorf("%s: %q", settings, got)
+		}
+	}
+}
+
 // rayctl service list: a DNS tunnel's dnsauth and seal modes, dnstt's or
 // masterdns's, then its spare zones.
 func TestKeyStateDNS(t *testing.T) {

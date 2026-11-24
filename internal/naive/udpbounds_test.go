@@ -379,6 +379,8 @@ func TestUDPDropWrite(t *testing.T) {
 	if g := q.recv(); string(g.data) != "after" {
 		t.Fatalf("%q", g.data)
 	}
+	// Counted once the write returns: its answer can be back first.
+	eventually(t, "the datagram after counted", func() bool { return h.UDPStats().In == 1 })
 	if st := h.UDPStats(); st.In != 1 {
 		t.Fatalf("%+v", st)
 	}

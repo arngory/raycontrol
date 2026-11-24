@@ -744,6 +744,9 @@ func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error 
 	if err := h.Apply(plan, keep...); err != nil {
 		return err
 	}
+	if err := h.DropUncopiedSalamander(plan, render.DefaultPaths.Rendered); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: the old copies of a hy2-obfs password could not be removed:", err)
+	}
 	if len(outside) > 0 {
 		fmt.Println("a firewall of the provider in front of the host (security group, cloud firewall) must let in:",
 			outsidePorts(outside))

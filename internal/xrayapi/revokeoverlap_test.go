@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +16,6 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
-	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/traffic"
 )
 
@@ -171,7 +169,7 @@ func TestRevokeOverlapWithXray(t *testing.T) {
 		c.Close()
 	}
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	if !refused(client(old), target) {
+	if !refused(t, client(old), target) {
 		t.Fatal("the old credential still gets in after the grace")
 	}
 	if err := y.exchange(onNext, 6000); err != nil {
@@ -183,8 +181,15 @@ func TestRevokeOverlapWithXray(t *testing.T) {
 }
 
 // TestRevokeOverlapWithNikoServer: the same on Hysteria2 (hy2-obfs on
-// niko-server behind its UDP front, Xray as the client). Set XRAY_BIN and
-// NIKO_SERVER_BIN (v0.15.0 or later).
+// niko-server behind its UDP front, Xray as the client), each device on
+// its own line: its own salamander password, which the front takes off
+// (spec/salamander-device-v1.md). Here the revoked device does not go on
+// on the old credential: the apply after the revocation takes its
+// password off the front's list (§4.2), and its stream carries nothing
+// more, its datagrams opening under none of the passwords left, the
+// other device's among them; its line gets in no more, not with the
+// next credential either. The other device goes on as above. Set
+// XRAY_BIN and NIKO_SERVER_BIN (v0.19.3 or later).
 func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
@@ -192,12 +197,15 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	}
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
-		t.Skip("set NIKO_SERVER_BIN to niko-server v0.15.0 or later")
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.19.3 or later")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	st, paths, a, svc := switchNode(t, ctx, "hy2-obfs")
-	phone, _ := twoDevices(t, ctx, st)
+	phone, laptop := twoDevices(t, ctx, st)
+	if err := a.Apply(ctx); err != nil && !render.Partial(err) {
+		t.Fatal(err)
+	}
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -205,41 +213,15 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	uid := m.Users[0].ID
 	old := m.Creds[svc.ID][uid]
 	usersFile := filepath.Join(paths.Rendered, svc.Name, render.HysteriaUsers)
-	copies := map[string]string{
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaKey):    paths.Credential(svc.Name, render.HysteriaKey),
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaObfs):   paths.Credential(svc.Name, render.HysteriaObfs),
-		filepath.Join(paths.Rendered, "front", svc.Name+".salamander"): paths.FrontSalamander(svc.Name),
+	secret := string(m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })].Secrets[provision.SecretObfsPassword])
+	pPhone, pLaptop := store.SalamanderDevicePassword(secret, phone.Key[:]), store.SalamanderDevicePassword(secret, laptop.Key[:])
+	if got := salamanderKeys(t, paths, svc.Name); len(got) != 2 || !slices.Contains(got, pPhone) || !slices.Contains(got, pLaptop) {
+		t.Fatalf("the front's salamander passwords: %d, want both devices'", len(got))
 	}
-	for from, to := range copies {
-		b, err := os.ReadFile(from)
-		if err != nil {
-			t.Fatal(err)
-		}
-		os.MkdirAll(filepath.Dir(to), 0o755)
-		os.WriteFile(to, b, 0o600)
-	}
-	os.MkdirAll(paths.FrontDir(svc.Name), 0o755)
-	backend := startNiko(t, niko, "backend", filepath.Join(paths.Rendered, svc.Name, "backend.json"), func(cfg map[string]any) {
-		cfg["front_uid"] = os.Getuid()
-		cfg["log"] = map[string]string{"level": "info"}
-	})
-	port := freeUDP(t)
-	startNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
-		cfg["udp"].(map[string]any)["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
-		for _, ref := range cfg["backends"].(map[string]any) {
-			ref.(map[string]any)["uid"] = os.Getuid()
-		}
-		delete(cfg, "tcp")
-		delete(cfg, "dns")
-	})
-	backend.waitReload(t)
+	backend, front, port := startObfs(t, niko, paths, svc.Name)
 
-	profiles, err := sub.Profiles(m, m.Users[0])
-	if err != nil || len(profiles) != 1 {
-		t.Fatalf("profiles %v %v", profiles, err)
-	}
-	link := strings.Replace(profiles[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
-	client := func(password string) int {
+	phoneLink, laptopLink := obfsLink(t, m, svc.Name, phone.Key[:], port), obfsLink(t, m, svc.Name, laptop.Key[:], port)
+	client := func(link, password string) int {
 		socks, _ := hysteriaSocks(t, bin, link, password, "")
 		return socks
 	}
@@ -248,7 +230,7 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb}
 	var y tally
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	onPhone, onLaptop := y.open(t, client(old), target), y.open(t, client(old), target)
+	onPhone, onLaptop := y.open(t, client(phoneLink, old), target), y.open(t, client(laptopLink, old), target)
 	if err := y.exchange(onLaptop, 20000); err != nil {
 		t.Fatal(err)
 	}
@@ -267,15 +249,26 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	if next == "" || !strings.Contains(string(published), old) || !strings.Contains(string(published), next) {
 		t.Fatalf("the users file after the revocation:\n%s", published)
 	}
+	if got := salamanderKeys(t, paths, svc.Name); !slices.Equal(got, []string{pLaptop}) {
+		t.Fatalf("the front's salamander passwords after the revocation: %d, want the other device's", len(got))
+	}
 	if closed := backend.reload(t); closed != 0 {
 		t.Fatalf("the revocation closed %d connections", closed)
 	}
-	for name, c := range map[string]net.Conn{"revoked device": onPhone, "other device": onLaptop} {
-		if err := y.exchange(c, 3000); err != nil {
-			t.Fatalf("the %s's stream on the old password, cut by the revocation: %v", name, err)
-		}
+	// The front's next read of its list: the revoked device's flow is
+	// forgotten, its next datagrams open under no password left.
+	front.keysRead(t, 1)
+	if err := y.exchange(onLaptop, 3000); err != nil {
+		t.Fatalf("the other device's stream on the old password, cut by the revocation: %v", err)
 	}
-	onNext := y.open(t, client(next), target)
+	if !stalled(onPhone, 3*time.Second) {
+		t.Fatal("the revoked device's stream on the old password still carries after the apply")
+	}
+	onPhone.Close()
+	if !refused(t, client(phoneLink, next), target) {
+		t.Fatal("the revoked device's salamander password still gets in after the apply")
+	}
+	onNext := y.open(t, client(laptopLink, next), target)
 	counted(t, ctx, st, acct, hb, "alice", &y)
 
 	// The switch: the same file; read again, it cuts nothing.
@@ -286,15 +279,17 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	if closed := backend.reload(t); closed != 0 {
 		t.Fatalf("the switch closed %d connections", closed)
 	}
-	for i, c := range []net.Conn{onPhone, onLaptop, onNext} {
+	for i, c := range []net.Conn{onLaptop, onNext} {
 		if err := y.exchange(c, 4000+i); err != nil {
 			t.Fatalf("a stream after the switch: %v", err)
 		}
 	}
 	counted(t, ctx, st, acct, hb, "alice", &y)
 
-	// The grace's end: the old password gone, both devices' streams on it
-	// cut; it gets in no more; the next one goes on.
+	// The grace's end: the old password gone, the other device's stream
+	// on it cut; it gets in no more; the next one goes on. The backend
+	// still had the revoked device's connection too (its idle timeout is
+	// 60 s; the front only drops its datagrams): it closes both.
 	revocationStep(t, ctx, st, a, rev.Until)
 	if b, _ := os.ReadFile(usersFile); strings.Contains(string(b), old) {
 		t.Fatalf("the users file keeps the old password after the grace:\n%s", b)
@@ -302,14 +297,12 @@ func TestRevokeOverlapWithNikoServer(t *testing.T) {
 	if closed := backend.reload(t); closed != 2 {
 		t.Fatalf("the grace's end closed %d connections, want both devices' on the old password", closed)
 	}
-	for name, c := range map[string]net.Conn{"revoked device": onPhone, "other device": onLaptop} {
-		if ok, d := cut(c, 3*time.Second); !ok {
-			t.Fatalf("the %s's stream on the old password: not cut after %v", name, d)
-		}
-		c.Close()
+	if ok, d := cut(onLaptop, 3*time.Second); !ok {
+		t.Fatalf("the other device's stream on the old password: not cut after %v", d)
 	}
+	onLaptop.Close()
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	if !refused(client(old), target) {
+	if !refused(t, client(laptopLink, old), target) {
 		t.Fatal("the old password still gets in after the grace")
 	}
 	if err := y.exchange(onNext, 7000); err != nil {

@@ -1,6 +1,9 @@
 package deploy
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -70,4 +73,49 @@ func UnitCopies(unit []byte) map[string]bool {
 		}
 	}
 	return out
+}
+
+// DropUncopiedSalamander removes, after Apply installed plan's units, the
+// files of before that held a hy2-obfs service's own salamander password
+// under rendered (rendered/<service>/salamander, the backend's, and
+// rendered/front/<service>.salamander, the front's) that no unit of plan
+// copies in any more. From niko-server v0.19.3 the front takes the
+// devices' passwords from a file of its own and the backend has none
+// (spec/salamander-device-v1.md §4): rayd renders neither file, and on an
+// updated node both stayed, the service's secret on disk twice. rayd
+// removes them too once the installed units no longer take them, but on
+// an update it renders before rayctl apply installs the units of now.
+func (h *Host) DropUncopiedSalamander(plan Plan, rendered string) error {
+	copied := map[string]bool{}
+	for _, f := range plan.Files {
+		if !strings.HasPrefix(f.Path, "/etc/systemd/system/") {
+			continue
+		}
+		for line := range strings.Lines(string(f.Content)) {
+			v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStartPre=")
+			if !ok {
+				continue
+			}
+			if src, _, ok := copyOf(v); ok {
+				copied[src] = true
+			}
+		}
+	}
+	var errs []error
+	for _, pattern := range []string{path.Join(rendered, "*", "salamander"), path.Join(rendered, "front", "*.salamander")} {
+		found, err := filepath.Glob(h.path(pattern))
+		if err != nil {
+			return err
+		}
+		for _, f := range found {
+			p := "/" + strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(f, h.Root)), "/")
+			if copied[p] {
+				continue
+			}
+			if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }

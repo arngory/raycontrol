@@ -22,8 +22,11 @@ import (
 // apply. Routed at once, the new one kept the whole front, every route
 // on TCP and UDP 443, from starting until that apply (restarting every
 // 2 s). After the apply (here: its unit written as rayctl apply writes
-// it), the next render routes it.
+// it), the next render routes it. One password for the service, before
+// niko-server v0.19.3: from it the front rereads the devices' passwords in
+// place and routes a new hy2-obfs at once (salamander_test.go).
 func TestApplyObfsWaitsForFrontUnit(t *testing.T) {
+	defer render.UseNikoServer("v0.19.2")()
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))

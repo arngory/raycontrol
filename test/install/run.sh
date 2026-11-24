@@ -227,15 +227,16 @@ if [[ $distro == debian13 ]]; then
 	# the service's salamander password, again every 2 s, at that apply,
 	# an update or a reboot (review of v0.28.0).
 	out="$(x rayctl service add hy2-obfs hy2-obfs 2>&1)" || fail "rayctl service add hy2-obfs: $out"
-	# Before the apply its password is not copied in for the front: rayd
-	# keeps it off the front's config, which would fail the front at every
-	# start (restarting every 2 s) until the apply. REALITY waits for its
-	# certificate: the front carries nothing, has no config and stays
-	# down. rayd renders half a second after the change; the front's
-	# first restart would come 2 s after its failed start.
+	# Before the apply the front must not fail at every start (restarting
+	# every 2 s) for a password its unit does not copy in. From niko-server
+	# v0.19.3 there is none to copy: the front reads the devices'
+	# salamander passwords from a file of its own (salamander-device-v1),
+	# so the service may be routed at once. rayd renders half a second
+	# after the change; a failing front's first restart would come 2 s
+	# after its failed start.
 	sleep 5
-	st="$(x systemctl show -p ActiveState,SubState,NRestarts niko-front.service | sort | paste -sd' ')"
-	if [[ $st != "ActiveState=inactive NRestarts=0 SubState=dead" ]] || x test -e /var/lib/raycontrol/rendered/front/front.json; then
+	st="$(x systemctl show -p ActiveState,NRestarts niko-front.service | sort | paste -sd' ')"
+	if [[ $st != *NRestarts=0* || $st == *ActiveState=failed* || $st == *ActiveState=activating* ]]; then
 		fail "the front with a hy2-obfs not applied ($st): $(x journalctl --no-pager -u niko-front -n 5 -o cat)"
 	fi
 	out="$(x rayctl apply 2>&1)" || fail "rayctl apply with hy2-obfs: $out"
@@ -507,7 +508,11 @@ units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
 [[ $units == *" -probe 127.0.0.1:"* && $units == *IPAddressAllow=127.0.0.1* ]] || fail "naive does not lead the probe name to the endpoint: $units"
 wait_active niko-hy2o.service niko-front.service
 [[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
-[[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"
+# The devices' salamander passwords, a file the front rereads in place
+# (salamander-device-v1 §4): readable by the front's group, no copy of a
+# password of the service's.
+[[ $(x stat -c '%a %G' /var/lib/raycontrol/rendered/front/hy2o.salamander.keys) == "640 niko-front" ]] || fail "the front's salamander passwords file is not 0640 niko-front"
+x test -e /run/niko/front/hy2o.salamander && fail "a copy of the service's salamander password for the front"
 # The traffic limit (spec/traffic-limit-v1.md): the first limit turns
 # counting on; inner's Xray gives its users' bytes on its API, the
 # Hysteria2 backend on its stats socket, and rayd reads both (the loops
