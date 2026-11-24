@@ -1055,8 +1055,13 @@ func TestSlipstreamInSubscription(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := build()
-	if len(p.Profiles) != 1 || p.DNSAuth != nil || p.DNSProbe != nil || !slices.Contains(sub.ProbeTunnels, "slipstream") {
+	if len(p.Profiles) != 1 || p.DNSAuth != nil || p.DNSProbe == nil || !slices.Contains(sub.ProbeTunnels, "slipstream") {
 		t.Fatalf("payload %+v", p)
+	}
+	// The resolver probe key with slipstream alone: the client probes its
+	// zone (slipstream-v1 §4), which the front answers in.
+	if key, _ := f.st.DNSProbeKey(ctx); p.DNSProbe.V != 1 || base64.RawURLEncoding.EncodeToString(key) != p.DNSProbe.Key {
+		t.Errorf("dns_probe %+v", p.DNSProbe)
 	}
 	u, err := url.Parse(p.Profiles[0].Link)
 	if err != nil {
