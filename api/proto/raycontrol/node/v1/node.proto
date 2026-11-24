@@ -746,7 +746,7 @@ message GetConnLimitResponse {
   // Users who met a limit in the last 15 minutes, by number and service.
   repeated ConnLimitUser users = 4;
   // Refusals since rayd started reading them, by service and kind (tcp,
-  // rate, failed, udp, evicted, dest, live, lookup).
+  // rate, failed, udp, evicted, dest, live, lookup, conns, pending, memory).
   repeated ConnLimitRefused refused = 5;
 }
 

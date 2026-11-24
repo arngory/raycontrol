@@ -3581,7 +3581,7 @@ type GetConnLimitResponse struct {
 	// Users who met a limit in the last 15 minutes, by number and service.
 	Users []*ConnLimitUser `protobuf:"bytes,4,rep,name=users,proto3" json:"users,omitempty"`
 	// Refusals since rayd started reading them, by service and kind (tcp,
-	// rate, failed, udp, evicted, dest, live, lookup).
+	// rate, failed, udp, evicted, dest, live, lookup, conns, pending, memory).
 	Refused       []*ConnLimitRefused `protobuf:"bytes,5,rep,name=refused,proto3" json:"refused,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

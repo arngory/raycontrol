@@ -2,6 +2,7 @@ package doh_test
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -98,6 +99,8 @@ func BenchmarkRequestDuringReload(b *testing.B) {
 				}
 				h := newHandler(tokens, cacheFor)
 				req := httptest.NewRequest(http.MethodPut, "/dns-query/"+token, nil)
+				// Over X25519MLKEM768: a stranger's request is not timed here.
+				req.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, CurveID: tls.X25519MLKEM768}
 				serve := func() int {
 					w := httptest.NewRecorder()
 					h.ServeHTTP(w, req)

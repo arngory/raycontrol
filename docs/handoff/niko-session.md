@@ -88,9 +88,12 @@
 
 ### 3.4. Постквант в TLS
 
-- Hysteria2 (оба инстанса), naive (h2 и QUIC), DoH: `CurvePreferences = [X25519MLKEM768]`, без отката.
+- Hysteria2 (оба инстанса), naive (h2 и QUIC), DoH: `CurvePreferences = [X25519MLKEM768]`, без отката. С raycontrol
+  v0.36.1 и niko-server v0.19.3 у naive, DoH и hy2-masq рукопожатие — как у сайта (классические группы тоже), а
+  туннель, ответ DoH и пароль Hysteria2 — только по `X25519MLKEM768`; hy2-obfs — как было.
 - REALITY в Xray: гибридный ключ (по умолчанию с Xray 26.9.8) + `mldsa65Seed`.
-- Тест в CI: клиент без `X25519MLKEM768` не подключается.
+- Тест в CI: клиент без `X25519MLKEM768` не подключается (с v0.36.1 у naive, DoH и hy2-masq: рукопожатие проходит,
+  туннеля нет — ответ сайта или маскировки).
 
 ### 3.5. Внутренняя ступень `inner`
 

@@ -444,13 +444,13 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if s.App != nil {
 		p.App = s.App.Hint(ctx)
 	}
-	// dnsprobe-v1: for a user with a dnstt profile, the zones the front
-	// answers probes in (masterdns answers look otherwise). Not for
-	// slipstream, though the front answers them in its zone too: clients
-	// probe resolvers for dnstt only (Niko 1.37).
+	// dnsprobe-v1: for a user with a dnstt or slipstream profile, the zones
+	// the front answers probes in (masterdns answers look otherwise). With
+	// slipstream alone the client probes its first slipstream zone (Niko
+	// 1.68).
 	if len(m.DNSProbeKey) == 32 && slices.ContainsFunc(profiles, func(pr Profile) bool {
 		return slices.ContainsFunc(m.Services, func(svc render.Service) bool {
-			return uint16(svc.ID) == pr.Svc && svc.Kind == "dnstt"
+			return uint16(svc.ID) == pr.Svc && (svc.Kind == "dnstt" || svc.Kind == "slipstream")
 		})
 	}) {
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}

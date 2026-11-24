@@ -1543,8 +1543,9 @@ func cmdSite(args []string) error {
 	return site.ServeCertificates(ctx, ln, handler, certs.GetCertificate, log)
 }
 
-// cmdNaive serves NaiveProxy (R2-14): TLS 1.3 with X25519MLKEM768 only and
-// HTTP/2 on the connections the front passes for the service's name (R2-15).
+// cmdNaive serves NaiveProxy (R2-14): the site's TLS, tunnels over
+// X25519MLKEM768 only, and HTTP/2 on the connections the front passes for
+// the service's name (R2-15).
 func cmdNaive(args []string) error {
 	fs := flag.NewFlagSet("naive", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what other requests get: 404, 403 or silent")
@@ -1707,24 +1708,27 @@ func cmdRelay(args []string) error {
 	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
-// dohHTTPServer is the HTTP/2 side of a DoH service: TLS 1.3 with
-// X25519MLKEM768 only, and the HTTP server every name of the node's address
-// has (site.HTTPServer).
+// dohHTTPServer is the HTTP/2 side of a DoH service: the site's TLS
+// (site.TLSConfigFor: TLS 1.2 and 1.3, Go's groups, X25519MLKEM768 first)
+// and the HTTP server every name of the node's address has
+// (site.HTTPServer). Before v0.36.1 it took TLS 1.3 with X25519MLKEM768
+// only, and a probe without ML-KEM told the name from the site's by the
+// refusal; now the handler answers a query only over X25519MLKEM768
+// (doh.Handler, site.PostQuantum), anything else as the site does.
 func dohHTTPServer(h http.Handler, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
 	srv := site.HTTPServer(h, site.IdleTimeout)
 	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
-	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	srv.TLSConfig = site.TLSConfigFor(cert)
 	return srv
 }
 
-// naiveHTTPServer is the HTTP/2 side of a naive service: TLS 1.3 with
-// X25519MLKEM768 only, and the same HTTP server (naive.Server.HTTPServer).
+// naiveHTTPServer is the HTTP/2 side of a naive service: the site's TLS, as
+// DoH's (dohHTTPServer), and the same HTTP server (naive.Server.HTTPServer);
+// a tunnel only over X25519MLKEM768 (naive.Server, site.PostQuantum).
 func naiveHTTPServer(ns *naive.Server, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
 	srv := ns.HTTPServer()
 	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
-	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	srv.TLSConfig = site.TLSConfigFor(cert)
 	return srv
 }
 

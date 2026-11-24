@@ -23,8 +23,9 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// Kinds are the refusals a process counts (§2), in this order.
-var Kinds = []string{"tcp", "rate", "failed", "udp", "evicted", "dest", "live", "lookup"}
+// Kinds are the refusals a process counts (§2), in this order. conns,
+// pending and memory come from Hysteria2 (niko-server v0.19.3, §3.2).
+var Kinds = []string{"tcp", "rate", "failed", "udp", "evicted", "dest", "live", "lookup", "conns", "pending", "memory"}
 
 // The loop's times (§7).
 const (
