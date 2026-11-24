@@ -96,6 +96,7 @@ func FuzzServeHTTP(f *testing.F) {
 		body := &countingReader{r: req.Body}
 		req.Body = io.NopCloser(body)
 		req.RemoteAddr = "198.51.100.7:40000"
+		pq(req) // the key exchange: TestClassicalIsAStranger has the others
 		forwarded = nil
 		w := httptest.NewRecorder()
 		handlers[failing].ServeHTTP(w, req)

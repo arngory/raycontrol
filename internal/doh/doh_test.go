@@ -3,6 +3,7 @@ package doh
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -37,11 +38,12 @@ func TestHandler(t *testing.T) {
 	good := tok(1)
 	h := &Handler{Upstreams: []string{down.URL, upstream.URL},
 		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{good: true, "tok": true}, nil }}
-	srv := httptest.NewServer(h)
+	srv := pqServer(h)
 	defer srv.Close()
+	client := srv.Client()
 
 	get := func(path string) (*http.Response, []byte) {
-		resp, err := http.Get(srv.URL + path)
+		resp, err := client.Get(srv.URL + path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +56,7 @@ func TestHandler(t *testing.T) {
 		resp.Header.Get("Cache-Control") != "max-age=60" {
 		t.Fatalf("GET: %s %v", resp.Status, resp.Header)
 	}
-	r, _ := http.Post(srv.URL+"/dns-query/"+good, "application/dns-message", bytes.NewReader(query))
+	r, _ := client.Post(srv.URL+"/dns-query/"+good, "application/dns-message", bytes.NewReader(query))
 	b, _ = io.ReadAll(r.Body)
 	r.Body.Close()
 	if r.StatusCode != 200 || !bytes.Equal(b, answer) {
@@ -69,7 +71,7 @@ func TestHandler(t *testing.T) {
 	if resp, _ := get("/dns-query/" + good + "?dns=" + base64.RawURLEncoding.EncodeToString([]byte("short"))); resp.StatusCode != 400 {
 		t.Errorf("short message: %s", resp.Status)
 	}
-	r, _ = http.Post(srv.URL+"/dns-query/"+good, "text/plain", strings.NewReader("x"))
+	r, _ = client.Post(srv.URL+"/dns-query/"+good, "text/plain", strings.NewReader("x"))
 	r.Body.Close()
 	if r.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("wrong type: %s", r.Status)
@@ -82,7 +84,7 @@ func TestHandler(t *testing.T) {
 		"short":      bytes.NewReader(query),
 		"broken off": io.MultiReader(bytes.NewReader(query), iotest.ErrReader(errors.New("stream ended early"))),
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/dns-query/"+good, body)
+		req := pq(httptest.NewRequest(http.MethodPost, "/dns-query/"+good, body))
 		req.Header.Set("Content-Type", "application/dns-message")
 		req.ContentLength = int64(len(query)) + 10
 		rec := httptest.NewRecorder()
@@ -91,6 +93,21 @@ func TestHandler(t *testing.T) {
 			t.Errorf("%s: %d %q", name, rec.Code, rec.Body)
 		}
 	}
+}
+
+// pq is r as it comes over TLS 1.3 with X25519MLKEM768, the only key
+// exchange whose queries are answered (site.PostQuantum).
+func pq(r *http.Request) *http.Request {
+	r.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, CurveID: tls.X25519MLKEM768}
+	return r
+}
+
+// pqServer serves h over TLS, its client offering X25519MLKEM768 only.
+func pqServer(h http.Handler) *httptest.Server {
+	srv := httptest.NewUnstartedServer(h)
+	srv.StartTLS()
+	srv.Client().Transport.(*http.Transport).TLSClientConfig.CurvePreferences = []tls.CurveID{tls.X25519MLKEM768}
+	return srv
 }
 
 // tok is a token of the node's shape (a UUID's), numbered.
@@ -288,7 +305,7 @@ func TestUnshapedDoesNotWait(t *testing.T) {
 		Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
 	status := func(path string) int {
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, nil))
+		h.ServeHTTP(w, pq(httptest.NewRequest(http.MethodPut, path, nil)))
 		return w.Code
 	}
 	if status("/dns-query/"+tok(1)) != http.StatusMethodNotAllowed {
@@ -422,7 +439,7 @@ func TestRetired(t *testing.T) {
 	status := func(path string) int {
 		t.Helper()
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, nil))
+		h.ServeHTTP(w, pq(httptest.NewRequest(http.MethodPut, path, nil)))
 		if w.Code == http.StatusNotFound && (w.Body.Len() != 0 || w.Header().Get("Content-Length") != "0") {
 			t.Fatalf("%s: a 404 with %q", path, w.Body)
 		}
@@ -519,7 +536,7 @@ func TestTokensFail(t *testing.T) {
 	h.Forget()
 	status := func(path string) int {
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, nil))
+		h.ServeHTTP(w, pq(httptest.NewRequest(http.MethodPut, path, nil)))
 		return w.Code
 	}
 	status("/dns-query/" + a) // waits for the load the Forget began
@@ -603,5 +620,52 @@ func BenchmarkCheck(b *testing.B) {
 				h.check(ctx, c.tok, true)
 			}
 		})
+	}
+}
+
+// A request whose connection's key exchange was not X25519MLKEM768 (TLS
+// 1.2, a classical group of TLS 1.3, another hybrid, no TLS) is a
+// stranger's whatever its token, accepted or retired: the site's answer,
+// and the tokens are not looked at. Before v0.36.1 the handshake refused
+// such a client; now it is the site's (cmd/rayd), and this is what keeps
+// the queries post-quantum.
+func TestClassicalIsAStranger(t *testing.T) {
+	a, b := tok(0xa), tok(0xb)
+	src := newSource(a, b)
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens,
+		Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
+	serve := func(path string, cs *tls.ConnectionState) int {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPut, path, nil)
+		r.TLS = cs
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	mlkem := &tls.ConnectionState{Version: tls.VersionTLS13, CurveID: tls.X25519MLKEM768}
+	if serve("/dns-query/"+a, mlkem) != http.StatusMethodNotAllowed {
+		t.Fatal("an accepted token over X25519MLKEM768 is not answered")
+	}
+	src.set(a)
+	h.Forget()
+	if serve("/dns-query/"+b, mlkem) != http.StatusNotFound {
+		t.Fatal("a retired token over X25519MLKEM768 is not refused")
+	}
+	calls := src.calls.Load()
+	for name, cs := range map[string]*tls.ConnectionState{
+		"TLS 1.2, X25519":            {Version: tls.VersionTLS12, CurveID: tls.X25519},
+		"TLS 1.3, X25519":            {Version: tls.VersionTLS13, CurveID: tls.X25519},
+		"TLS 1.3, P-256":             {Version: tls.VersionTLS13, CurveID: tls.CurveP256},
+		"TLS 1.3, SecP256r1MLKEM768": {Version: tls.VersionTLS13, CurveID: tls.SecP256r1MLKEM768},
+		"no TLS":                     nil,
+	} {
+		for _, path := range []string{"/dns-query/" + a, "/dns-query/" + b, "/dns-query/" + tok(7), "/"} {
+			if got := serve(path, cs); got != http.StatusTeapot {
+				t.Errorf("%s, %s: %d, want the site's answer", name, path, got)
+			}
+		}
+	}
+	if got := src.calls.Load(); got != calls {
+		t.Errorf("the tokens were loaded %d times for strangers", got-calls)
 	}
 }

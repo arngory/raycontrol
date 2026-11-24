@@ -4,7 +4,10 @@
 // for the service (with rotation). Queries go on to upstream DoH
 // resolvers; nothing is logged. Anything else gets the site's answer
 // (Handler.Answer), as naive does; a token that was accepted a moment ago
-// gets an empty 404 at once instead (retired).
+// gets an empty 404 at once instead (retired). A request over a key
+// exchange other than X25519MLKEM768 is a stranger's whatever its token
+// (site.PostQuantum): the handshake is the site's (cmd/rayd), the answers
+// to queries post-quantum.
 package doh
 
 import (
@@ -21,6 +24,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/site"
 )
 
 // DefaultUpstreams are asked in order.
@@ -464,7 +469,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok || !tokenShaped(token) { // the node's tokens are all of that shape
 		token = ""
 	}
-	switch h.check(r.Context(), token, shapedPath(r.URL.Path)) {
+	v := stranger
+	// Not over X25519MLKEM768 (TLS 1.2, a classical group, no TLS): a
+	// stranger, at once, without a look at the tokens; no query is
+	// answered but post-quantum.
+	if site.PostQuantum(r) {
+		v = h.check(r.Context(), token, shapedPath(r.URL.Path))
+	}
+	switch v {
 	case refused:
 		// An empty 404, as a 404 site answers: at once, a status the
 		// client reads as a refusal over h2 and h3 alike.

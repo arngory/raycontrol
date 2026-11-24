@@ -122,8 +122,9 @@ func readResetKey(file string) (*quic.StatelessResetKey, error) {
 func quicConfig() *quic.Config { return h3serve.Config(h3Options(quicOptions{})) }
 
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends
-// (h3serve.Serve): TLS 1.3 with X25519MLKEM768 only, ALPN h3, the
-// certificate cert gives at each handshake (certfile.Holder).
+// (h3serve.Serve): TLS 1.3 with Go's groups, as the site's, ALPN h3, the
+// certificate cert gives at each handshake (certfile.Holder); naive and
+// DoH serve a request over X25519MLKEM768 only (site.PostQuantum).
 func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o quicOptions) error {
 	return h3serve.Serve(ctx, pc, cert, h, h3Options(o))
 }

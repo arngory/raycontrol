@@ -63,7 +63,10 @@ func chainLen(chain [][]byte) int {
 // TLSConfig is what the site offers: TLS 1.3 with X25519MLKEM768 first
 // (Go's default) and HTTP/2, as REALITY needs from its target, and TLS 1.2
 // with modern suites for the rest: a probe that REALITY hands to the site
-// meets a server like most others, not one that refuses TLS 1.2.
+// meets a server like most others, not one that refuses TLS 1.2. naive and
+// DoH on the same address offer the same (cmd/rayd, v0.36.1): a probe
+// cannot tell their names from the site's by what their handshakes take;
+// what they serve is for PostQuantum requests only.
 func TLSConfig(cert tls.Certificate) *tls.Config {
 	return TLSConfigFor(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil })
 }
@@ -77,6 +80,17 @@ func TLSConfigFor(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) *tls
 		GetCertificate: get,
 		NextProtos:     []string{"h2", "http/1.1"},
 	}
+}
+
+// PostQuantum reports whether r came over TLS whose key exchange was
+// X25519MLKEM768 (TLS 1.3, Go 1.25's ConnectionState.CurveID, set on a
+// resumption too, which Go's server makes with a key share only). naive's
+// tunnels and DoH's answers go over such connections alone: the handshake
+// takes what the site's does, so that a probe without ML-KEM meets the
+// site's answer on every name of the address, and the users' traffic stays
+// post-quantum. No TLS at all (r.TLS nil) is not.
+func PostQuantum(r *http.Request) bool {
+	return r.TLS != nil && r.TLS.CurveID == tls.X25519MLKEM768
 }
 
 // What the site answers to whoever REALITY hands it: a TLS handshake with
