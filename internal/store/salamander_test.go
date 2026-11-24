@@ -107,8 +107,10 @@ func TestMigration20SharedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Made in the upgrade's second, it may count as before: a second on.
-	if sharedOf(t, s, later.ID, now.Add(time.Second)) && later.CreatedAt.Unix() > before.Unix() {
+	// Made in the window's first second, it counts as before (seconds):
+	// the window starts at until less its length, not at before.
+	from := until.Add(-SalamanderSharedWindow).Unix()
+	if sharedOf(t, s, later.ID, now.Add(time.Second)) && later.CreatedAt.Unix() > from {
 		t.Fatal("a service made after the upgrade takes its S")
 	}
 	if _, err := s.RevokeDevice(ctx, "a000000000000001"); err != nil {

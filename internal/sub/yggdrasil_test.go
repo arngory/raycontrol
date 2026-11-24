@@ -383,6 +383,7 @@ func TestBrutalCeilings(t *testing.T) {
 	}
 	options := func(link ...int) map[string]any {
 		m, _ := render.CollectForRender(ctx, st)
+		m.LinkMbps = 0 // the test host's own link is no case here
 		if len(link) > 0 {
 			m.LinkMbps = link[0]
 		}
