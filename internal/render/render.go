@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -1649,11 +1650,18 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 	}
 	// Level 0, as every user here.
 	level := map[string]any{}
+	if kib := xrayBufferKiB.Load(); kib > 0 {
+		// Each connection's buffer by the unit's memory
+		// (docs/spec/memory-v1.md §6), not Xray's 512 KiB a direction.
+		level["bufferSize"] = kib
+	}
+	stats := false
 	if m.Traffic {
 		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user,
 		// read by rayd on the same API socket. Counters only: nothing of
 		// destinations.
 		level["statsUserUplink"], level["statsUserDownlink"] = true, true
+		stats = true
 	}
 	if !m.ConnLimitOff {
 		// The per-user connection limits (spec/conn-limit-v1.md §3.3, the
@@ -1661,10 +1669,13 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		// the stats (user>>>u5>>>limit>>>tcp, made at the first one), which
 		// rayd reads with the bytes. Off: no limiter at all.
 		level["limits"] = XrayConnLimits
+		stats = true
 	}
 	if len(level) > 0 {
-		cfg["stats"] = map[string]any{}
 		cfg["policy"] = map[string]any{"levels": map[string]any{"0": level}}
+	}
+	if stats {
+		cfg["stats"] = map[string]any{}
 		cfg["api"] = map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService", "StatsService"}}
 	}
 	b, err := jsonFile(cfg)
@@ -2372,4 +2383,20 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 			Reload: true, Needed: true},
 	)
 	return files, nil
+}
+
+// xrayBufferKiB is each Xray connection's buffer in KiB
+// (policy.levels.0.bufferSize), 0 for Xray's own (SetXrayBuffer).
+var xrayBufferKiB atomic.Int64
+
+// SetXrayBuffer sizes each Xray connection's buffer by the memory of a
+// data unit (docs/spec/memory-v1.md §6, unitMemory in bytes, 0 when not
+// known: Xray's own): 1024 connections both ways fit in it, 64 to 256
+// KiB. rayd sets it at its start, from the host's memory.
+func SetXrayBuffer(unitMemory int64) {
+	if unitMemory <= 0 {
+		xrayBufferKiB.Store(0)
+		return
+	}
+	xrayBufferKiB.Store(min(max(unitMemory>>21, 64), 256))
 }
