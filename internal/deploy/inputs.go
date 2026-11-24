@@ -39,6 +39,11 @@ type Inputs struct {
 	// Warnings are rayd's own: what it could not render, and why. Text for
 	// a person, nothing else (PrintableWarning).
 	Warnings []string
+	// MemTotal is the host's memory in bytes, as the one who builds the
+	// plan reads it (/proc/meminfo), not rayd's word: the units' memory
+	// lines and the data slice come from it (docs/spec/memory-v1.md §4).
+	// 0: none.
+	MemTotal int64
 }
 
 // ServiceInput is a service as Build needs it.

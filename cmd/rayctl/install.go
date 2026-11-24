@@ -23,6 +23,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -717,6 +718,8 @@ func (c *cli) deployPlan(ctx context.Context) (deploy.Plan, []deploy.PortRange, 
 	if err != nil {
 		return deploy.Plan{}, nil, fmt.Errorf("rayd's deployment inputs: %w; nothing was changed", err)
 	}
+	// The host's memory as root reads it, not rayd's word (memory-v1 §4).
+	in.MemTotal = memlimit.Read(memlimit.System).MemTotal
 	plan := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
 	plan.HostPorts = in.HostPorts
 	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)

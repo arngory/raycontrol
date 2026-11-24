@@ -70,17 +70,25 @@ var rootLine = regexp.MustCompile(`^(Exec[A-Za-z]*=[+!@:-]|Exec(Stop|StopPost|Re
 	`(Environment|EnvironmentFile|BindPaths|BindReadOnlyPaths|RootDirectory|RootImage|LoadCredential|SetCredential|PAMName|DynamicUser|` +
 	`PermissionsStartOnly|Type|KillMode|Delegate|DevicePolicy|DeviceAllow|NotifyAccess|OOMScoreAdjust|Nice)=|.*(CAP_SYS|CAP_DAC|CAP_SETUID|CAP_CHOWN|CAP_FOWNER)|.*[%\\]|Exec[A-Za-z]*=.*[;'"$])`)
 
+// memoryLine is what of rootLine a unit may have (docs/spec/memory-v1.md
+// §4): a memory limit as a share, an OOM score of the table (-1000 would
+// make a unit unkillable).
+var memoryLine = regexp.MustCompile(`^(Memory(Max|High)=[0-9]{1,3}\.[0-9]{2}%|OOMScoreAdjust=(-900|-800|-500|-200|0|200))$`)
+
 // FuzzPlanCheck: a line put into any file of a plan rayctl makes, or a
 // mode, is refused, or else it gives nothing of rootLine.
 func FuzzPlanCheck(f *testing.F) {
 	for _, l := range []string{"User=root", "ExecStartPre=+/bin/sh -c id", "Z /etc 0777 rayd rayd -", "kernel.core_pattern = |/x",
 		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns /run/niko/dns/x",
-		"Description=x", "After=niko-dns.service", "d /run/niko/x-in 2750 niko-x niko-front -", "NoNewPrivileges=no"} {
+		"Description=x", "After=niko-dns.service", "d /run/niko/x-in 2750 niko-x niko-front -", "NoNewPrivileges=no",
+		"OOMScoreAdjust=-1000", "MemoryMax=99.99%", "Slice=system.slice", "Delegate=yes"} {
 		f.Add(uint8(3), uint16(5), l, uint32(0o644))
 	}
 	f.Add(uint8(0), uint16(0), "", uint32(0o4755))
 	f.Fuzz(func(t *testing.T, at uint8, pos uint16, line string, mode uint32) {
-		p := clonePlan(deploy.Build(goodInputs(), render.DefaultPaths, deploy.DefaultBinaries))
+		in := goodInputs()
+		in.MemTotal = 1 << 30 // the units' memory lines and the data slice too
+		p := clonePlan(deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries))
 		i := int(at) % len(p.Files)
 		lines := strings.Split(string(p.Files[i].Content), "\n")
 		j := int(pos) % (len(lines) + 1)
@@ -95,7 +103,7 @@ func FuzzPlanCheck(f *testing.F) {
 		}
 		if strings.HasPrefix(p.Files[i].Path, "/etc/systemd/system/") {
 			for _, l := range strings.Split(line, "\n") {
-				if rootLine.MatchString(l) && !strings.HasPrefix(l, "ExecStartPre=+/usr/local/bin/rayd credential ") {
+				if rootLine.MatchString(l) && !memoryLine.MatchString(l) && !strings.HasPrefix(l, "ExecStartPre=+/usr/local/bin/rayd credential ") {
 					t.Fatalf("%s: %q accepted", p.Files[i].Path, l)
 				}
 			}

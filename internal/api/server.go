@@ -29,6 +29,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/health"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -1561,6 +1562,7 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	if err != nil {
 		return nil, err
 	}
+	in.MemTotal = memlimit.Read(memlimit.System).MemTotal
 	plan := deploy.Build(in, s.Paths, s.Binaries)
 	plan.HostPorts = in.HostPorts
 	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)

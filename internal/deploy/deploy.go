@@ -779,8 +779,15 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		},
 		rayspaUnit(bin),
 	}
+	// Each unit's memory (docs/spec/memory-v1.md §4), the data units in
+	// their slice; none without the host's memory.
+	mem := MemoryOf(in.MemTotal)
+	if mem.Total > 0 && len(units) > 0 {
+		plan.Files = append(plan.Files, mem.sliceFile())
+	}
 	for i, u := range append(control, units...) {
 		u.service = slices.DeleteFunc(u.service, func(s string) bool { return s == "" })
+		u.service = append(u.service, mem.lines(u)...)
 		// What the checks above let through cannot break the unit's lines;
 		// if Build ever let something through, the unit stays out.
 		if err := u.check(); err != nil {
