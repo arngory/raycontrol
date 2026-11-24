@@ -13,6 +13,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -71,6 +72,7 @@ func rootPlan(t *testing.T, srv *Server) (*nodev1.GetDeployInputsResponse, deplo
 	if err := in.Check(); err != nil {
 		t.Fatal(err)
 	}
+	in.MemTotal = memlimit.Read(memlimit.System).MemTotal // as rayctl reads it
 	return resp.Msg, deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
 }
 
