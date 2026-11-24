@@ -146,7 +146,7 @@ func (a *Applier) dropSharedSalamander(m render.Model) {
 		if units == "" {
 			return false // the supervisor copies in what its own plan names
 		}
-		b, err := os.ReadFile(filepath.Join(units, unit))
+		b, err := os.ReadFile(filepath.Join(units, unit)) //nolint:gosec // G304: an installed unit of the plan
 		return err == nil && deploy.UnitCopies(b)[cred]
 	}
 	for _, s := range m.Services {
