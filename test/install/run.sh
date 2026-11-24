@@ -619,6 +619,20 @@ for m in raycontrol_conntrack_max raycontrol_conn_guard_on 'raycontrol_conn_inbo
 	[[ $metrics == *"$m"* ]] || fail "metrics lack $m"
 done
 
+log "$distro: memory (docs/spec/memory-v1.md §4)"
+# The data plane in its slice, rayd and rayspa outside it, the OOM scores of
+# their kinds, a limit as systemd sees it; whether the kernel holds the units
+# to it depends on the container's cgroup: rayctl check says so.
+[[ $(x systemctl show -p Slice --value niko-front.service) == raycontrol-data.slice ]] || fail "the front is not in the data slice"
+[[ $(x systemctl show -p Slice --value rayd.service) == system.slice ]] || fail "rayd is not in system.slice"
+[[ $(x systemctl show -p OOMScoreAdjust --value rayspa.service) == -900 ]] || fail "rayspa's OOM score: $(x systemctl show -p OOMScoreAdjust --value rayspa.service)"
+[[ $(x systemctl show -p OOMScoreAdjust --value niko-front.service) == -500 ]] || fail "the front's OOM score"
+front_max="$(x systemctl show -p MemoryMax --value niko-front.service)"
+[[ $front_max =~ ^[0-9]+$ ]] || fail "the front has no memory limit: $front_max"
+check="$(x rayctl check 2>&1 || true)"
+[[ $check == *"memory budget"* && $check == *"memory limits"* ]] || fail "rayctl check has no memory results: $check"
+grep -E 'memory (budget|limits)|data plane memory' <<<"$check" >&2 || true
+
 log "$distro: host firewall reloads and flush ruleset"
 case $distro in
 debian*) x systemctl restart nftables.service && wait_table "nftables restart" ;;
