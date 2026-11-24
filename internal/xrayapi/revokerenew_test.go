@@ -15,8 +15,8 @@ import (
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
-	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/traffic"
 )
 
@@ -28,12 +28,21 @@ import (
 
 // refused reports whether a stream through a client's SOCKS port fails to
 // carry an exchange within a few seconds: the node refused the client's
-// credential.
-func refused(socks int, target net.Addr) bool {
+// credential. It waits for the client to listen: a client still starting
+// is no refusal.
+func refused(t *testing.T, socks int, target net.Addr) bool {
+	t.Helper()
 	tp := target.(*net.TCPAddr).Port
-	c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(socks), time.Second)
+	var c net.Conn
+	var err error
+	for range 50 {
+		if c, err = net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(socks), time.Second); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err != nil {
-		return true
+		t.Fatalf("the client on %d does not listen: %v", socks, err)
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(3 * time.Second))
@@ -49,15 +58,21 @@ func refused(socks int, target net.Addr) bool {
 	return y.exchange(c, 100) != nil
 }
 
+// enrolled is a device and its SPA key, which its hy2-obfs line's
+// salamander password comes from (spec/salamander-device-v1.md §2).
+type enrolled struct {
+	store.Device
+	Key [spa.KeySize]byte
+}
+
 // twoDevices enrolls two devices of alice: the one to revoke, and the one kept.
-func twoDevices(t *testing.T, ctx context.Context, st *store.Store) (revoked, kept store.Device) {
+func twoDevices(t *testing.T, ctx context.Context, st *store.Store) (revoked, kept enrolled) {
 	t.Helper()
-	revoked, _, err := st.CreateDevice(ctx, "alice", "phone", "user")
-	if err != nil {
+	var err error
+	if revoked.Device, revoked.Key, err = st.CreateDevice(ctx, "alice", "phone", "user"); err != nil {
 		t.Fatal(err)
 	}
-	kept, _, err = st.CreateDevice(ctx, "alice", "laptop", "user")
-	if err != nil {
+	if kept.Device, kept.Key, err = st.CreateDevice(ctx, "alice", "laptop", "user"); err != nil {
 		t.Fatal(err)
 	}
 	return revoked, kept
@@ -152,7 +167,7 @@ func TestRevokeRenewsWithXray(t *testing.T) {
 	}
 	// Its bytes since the last poll are counted.
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	if !refused(client(old), target) {
+	if !refused(t, client(old), target) {
 		t.Fatal("the old credential still gets in after the apply")
 	}
 	m, _ = render.Collect(ctx, st)
@@ -172,8 +187,13 @@ func TestRevokeRenewsWithXray(t *testing.T) {
 }
 
 // TestRevokeRenewsWithNikoServer: the same on Hysteria2 (hy2-obfs on
-// niko-server behind its UDP front, Xray as the client). Set XRAY_BIN and
-// NIKO_SERVER_BIN (v0.15.0 or later).
+// niko-server behind its UDP front, Xray as the client), each device on
+// its own line: its own salamander password, which the front takes off
+// (spec/salamander-device-v1.md). The revocation takes the revoked
+// device's password off the front's list with the apply after it
+// (§4.2): its stream carries nothing more, and its line gets in no more,
+// not with the user's new credential either; the other device's goes on.
+// Set XRAY_BIN and NIKO_SERVER_BIN (v0.19.3 or later).
 func TestRevokeRenewsWithNikoServer(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
@@ -181,12 +201,15 @@ func TestRevokeRenewsWithNikoServer(t *testing.T) {
 	}
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
-		t.Skip("set NIKO_SERVER_BIN to niko-server v0.15.0 or later")
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.19.3 or later")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	st, paths, a, svc := switchNode(t, ctx, "hy2-obfs")
-	phone, _ := twoDevices(t, ctx, st)
+	phone, laptop := twoDevices(t, ctx, st)
+	if err := a.Apply(ctx); err != nil && !render.Partial(err) {
+		t.Fatal(err)
+	}
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -194,41 +217,15 @@ func TestRevokeRenewsWithNikoServer(t *testing.T) {
 	uid := m.Users[0].ID
 	old := m.Creds[svc.ID][uid]
 	usersFile := filepath.Join(paths.Rendered, svc.Name, render.HysteriaUsers)
-	copies := map[string]string{
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaKey):    paths.Credential(svc.Name, render.HysteriaKey),
-		filepath.Join(paths.Rendered, svc.Name, render.HysteriaObfs):   paths.Credential(svc.Name, render.HysteriaObfs),
-		filepath.Join(paths.Rendered, "front", svc.Name+".salamander"): paths.FrontSalamander(svc.Name),
+	secret := string(m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })].Secrets[provision.SecretObfsPassword])
+	pPhone, pLaptop := store.SalamanderDevicePassword(secret, phone.Key[:]), store.SalamanderDevicePassword(secret, laptop.Key[:])
+	if got := salamanderKeys(t, paths, svc.Name); len(got) != 2 || !slices.Contains(got, pPhone) || !slices.Contains(got, pLaptop) {
+		t.Fatalf("the front's salamander passwords: %d, want both devices'", len(got))
 	}
-	for from, to := range copies {
-		b, err := os.ReadFile(from)
-		if err != nil {
-			t.Fatal(err)
-		}
-		os.MkdirAll(filepath.Dir(to), 0o755)
-		os.WriteFile(to, b, 0o600)
-	}
-	os.MkdirAll(paths.FrontDir(svc.Name), 0o755)
-	backend := startNiko(t, niko, "backend", filepath.Join(paths.Rendered, svc.Name, "backend.json"), func(cfg map[string]any) {
-		cfg["front_uid"] = os.Getuid()
-		cfg["log"] = map[string]string{"level": "info"}
-	})
-	port := freeUDP(t)
-	startNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
-		cfg["udp"].(map[string]any)["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
-		for _, ref := range cfg["backends"].(map[string]any) {
-			ref.(map[string]any)["uid"] = os.Getuid()
-		}
-		delete(cfg, "tcp")
-		delete(cfg, "dns")
-	})
-	backend.waitReload(t)
+	backend, front, port := startObfs(t, niko, paths, svc.Name)
 
-	profiles, err := sub.Profiles(m, m.Users[0])
-	if err != nil || len(profiles) != 1 {
-		t.Fatalf("profiles %v %v", profiles, err)
-	}
-	link := strings.Replace(profiles[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
-	client := func(password string) int {
+	phoneLink, laptopLink := obfsLink(t, m, svc.Name, phone.Key[:], port), obfsLink(t, m, svc.Name, laptop.Key[:], port)
+	client := func(link, password string) int {
 		socks, _ := hysteriaSocks(t, bin, link, password, "")
 		return socks
 	}
@@ -237,7 +234,7 @@ func TestRevokeRenewsWithNikoServer(t *testing.T) {
 	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb}
 	var y tally
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	onPhone, onLaptop := y.open(t, client(old), target), y.open(t, client(old), target)
+	onPhone, onLaptop := y.open(t, client(phoneLink, old), target), y.open(t, client(laptopLink, old), target)
 	if err := y.exchange(onLaptop, 20000); err != nil {
 		t.Fatal(err)
 	}
@@ -252,21 +249,39 @@ func TestRevokeRenewsWithNikoServer(t *testing.T) {
 	if b, _ := os.ReadFile(usersFile); strings.Contains(string(b), old) {
 		t.Fatalf("the users file keeps the old password:\n%s", b)
 	}
+	if got := salamanderKeys(t, paths, svc.Name); !slices.Equal(got, []string{pLaptop}) {
+		t.Fatalf("the front's salamander passwords after the revocation: %d, want the other device's", len(got))
+	}
+	// The backend's users at once (the revoked device's connection is
+	// still there for it, whatever the front did with its datagrams by
+	// then), the front's list at its next read.
 	if closed := backend.reload(t); closed != 2 {
 		t.Fatalf("the revocation closed %d connections, want both devices'", closed)
 	}
-	for name, c := range map[string]net.Conn{"revoked device": onPhone, "other device": onLaptop} {
-		if ok, d := cut(c, 3*time.Second); !ok {
-			t.Fatalf("the %s's stream on the old password: not cut after %v", name, d)
-		}
-		c.Close()
+	front.keysRead(t, 1)
+	if ok, d := cut(onLaptop, 3*time.Second); !ok {
+		t.Fatalf("the other device's stream on the old password: not cut after %v", d)
 	}
+	onLaptop.Close()
+	// The revoked device's stream: cut by the backend, or its datagrams
+	// open under none of the front's passwords, the other device's
+	// neither.
+	if !stalled(onPhone, 3*time.Second) {
+		t.Fatal("the revoked device's stream still carries")
+	}
+	onPhone.Close()
 	counted(t, ctx, st, acct, hb, "alice", &y)
-	if !refused(client(old), target) {
+	if !refused(t, client(laptopLink, old), target) {
 		t.Fatal("the old password still gets in after the apply")
 	}
 	m, _ = render.Collect(ctx, st)
-	onLaptop = y.open(t, client(m.Creds[svc.ID][uid]), target)
+	fresh := m.Creds[svc.ID][uid]
+	// The revoked device's salamander password gets in no more, with the
+	// user's new credential either: only the front refuses it.
+	if !refused(t, client(phoneLink, fresh), target) {
+		t.Fatal("the revoked device's salamander password still gets in after the apply")
+	}
+	onLaptop = y.open(t, client(laptopLink, fresh), target)
 	if err := y.exchange(onLaptop, 7000); err != nil {
 		t.Fatal(err)
 	}

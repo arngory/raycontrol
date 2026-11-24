@@ -47,6 +47,11 @@ import (
 // the user's credentials rotate with the lead and the grace of rayd's
 // flags, the laptop's subscription carries the next REALITY link, which
 // the running Xray takes at once, and its current links go on working.
+// hy2-obfs's lines are the devices' (spec/salamander-device-v1.md): the
+// phone's, with its own salamander password, works until the revocation,
+// and rayd's apply after it takes the password off the front's list: the
+// phone's stream carries nothing more and its line gets in no more,
+// though its credential is still the user's current one.
 func TestSupervisedNode(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	niko := os.Getenv("NIKO_SERVER_BIN")
@@ -139,7 +144,7 @@ func TestSupervisedNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	phone, _, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	phone, phoneKey, err := st.CreateDevice(ctx, "alice", "phone", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +160,9 @@ func TestSupervisedNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := sub.Profiles(m, m.Users[0])
+	// The laptop's profiles, as its subscription has them, and the
+	// phone's hy2-obfs line: a salamander password each.
+	profiles, err := sub.DeviceProfiles(m, m.Users[0], key[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +173,12 @@ func TestSupervisedNode(t *testing.T) {
 		}
 		return profiles[i].Link
 	}
+	phones, err := sub.DeviceProfiles(m, m.Users[0], phoneKey[:])
+	pi := slices.IndexFunc(phones, func(p sub.Profile) bool { return p.Name == "hy2o" })
+	if err != nil || pi < 0 || phones[pi].Link == linkOf("hy2o") {
+		t.Fatalf("the phone's profiles %v %v", profileNames(phones), err)
+	}
+	phoneLink := phones[pi].Link
 	subSvc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
 	subSecrets, _ := st.ServiceSecrets(ctx, subSvc.ID)
 	pin := mustPin(t, subSecrets[provision.SecretTLSCert])
@@ -338,6 +351,13 @@ func TestSupervisedNode(t *testing.T) {
 		t.Fatalf("link from %s: %s (%+v, %v)", ls.Address, raw, stats, err)
 	}
 
+	// The phone's hy2-obfs line gets in too, before its revocation.
+	target := exchangeTarget(t)
+	var y tally
+	phonePort, stopPhone := hysteriaSocks(t, bin, phoneLink, "", "")
+	defer stopPhone()
+	onPhone := y.open(t, phonePort, target)
+
 	// The phone revoked with overlap through rayd's API: alice's
 	// credentials rotate with rayd's lead and grace (2 h, and 1 h raised
 	// to 12 h), stored at its start; nothing restarts, the next REALITY
@@ -357,6 +377,22 @@ func TestSupervisedNode(t *testing.T) {
 	i := slices.IndexFunc(fetched.Profiles, func(p sub.Profile) bool { return p.Name == "reality" })
 	if i < 0 || fetched.Profiles[i].Link != linkOf("reality") || fetched.Profiles[i].Next == nil || fetched.Profiles[i].Next.From != rev.Msg.SwitchAt {
 		t.Fatalf("the laptop's subscription after the revocation: %+v", fetched.Profiles)
+	}
+	if h := slices.IndexFunc(fetched.Profiles, func(p sub.Profile) bool { return p.Name == "hy2o" }); h < 0 || fetched.Profiles[h].Link != linkOf("hy2o") {
+		t.Fatalf("the laptop's hy2-obfs line in its subscription: not its own (%v)", profileNames(fetched.Profiles))
+	}
+	// rayd applies after the revocation, the front reads its list again
+	// within 5 s: the phone's stream stops carrying, its line is refused.
+	for i := 0; !stalled(onPhone, 2*time.Second); i++ {
+		if i == 10 {
+			t.Fatal("the revoked phone's hy2-obfs stream still carries")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	onPhone.Close()
+	stopPhone()
+	if !refused(t, func() int { p, _ := hysteriaSocks(t, bin, phoneLink, "", ""); return p }(), target) {
+		t.Fatal("the revoked phone's hy2-obfs line still gets in")
 	}
 	nextPort, stopNext := realitySocks(t, bin, fetched.Profiles[i].Next.Link, "")
 	probeVia("REALITY with the next credential", nextPort)

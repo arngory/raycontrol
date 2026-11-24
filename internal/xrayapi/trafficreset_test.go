@@ -122,7 +122,9 @@ func TestTrafficResetSupervised(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := sub.Profiles(m, m.Users[0])
+	// The laptop's profiles: hy2-obfs's line is a device's, with its own
+	// salamander password (spec/salamander-device-v1.md §2).
+	profiles, err := sub.DeviceProfiles(m, m.Users[0], key[:])
 	if err != nil {
 		t.Fatal(err)
 	}
