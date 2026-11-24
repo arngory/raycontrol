@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -1374,14 +1375,23 @@ func slipstreamFiles(s Service, p Paths) ([]File, error) {
 // dnsauth-v2 field the front checked skipped, the streams to the inner
 // stage, its own certificate, zone and ALPN, its connections at once and a
 // device's (the device the front names); the other limits are the
-// server's defaults.
-func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
+// server's defaults. With the unit's memory limit (unitMemory, 0 when not
+// known; docs/spec/memory-v1.md §6) the bytes queued towards the inner
+// stage are a quarter of it, 8–64 MiB, and the connections no more than
+// fit in it at some 400 KiB each.
+func SlipstreamArgs(s Service, inner string, p Paths, unitMemory int64) ([]string, error) {
 	ss, err := provision.ParseSlipstream(s.Service)
 	if err != nil {
 		return nil, fmt.Errorf("service %s: %w", s.Name, err)
 	}
 	total, device := ss.Connections()
-	return []string{
+	var pending []string
+	if unitMemory > 0 {
+		total = min(total, max(int(unitMemory/slipstreamConnectionMemory), provision.MinSlipstreamConnections))
+		device = min(device, total)
+		pending = []string{"--max-pending-mib", strconv.FormatInt(min(max(unitMemory/4>>20, 8), 64), 10)}
+	}
+	return append([]string{
 		"--front-socket", p.FrontSocket(s.Name, "packet"),
 		"--front-uid", strconv.Itoa(p.PeerUID(FrontUID)),
 		"--tag-len", "8",
@@ -1392,8 +1402,13 @@ func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
 		"--alpn", ss.ALPN,
 		"--max-connections", strconv.Itoa(total),
 		"--max-connections-per-device", strconv.Itoa(device),
-	}, nil
+	}, pending...), nil
 }
+
+// slipstreamConnectionMemory is what a slipstream connection may hold
+// (docs/spec/memory-v1.md §6): picoquic's state and buffers, its share of
+// the queue towards the inner stage.
+const slipstreamConnectionMemory = 400 << 10
 
 // dnsBackend renders a DNS tunnel's backend for its zones, the main one
 // first.
@@ -1635,11 +1650,18 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 	}
 	// Level 0, as every user here.
 	level := map[string]any{}
+	if kib := xrayBufferKiB.Load(); kib > 0 {
+		// Each connection's buffer by the unit's memory
+		// (docs/spec/memory-v1.md §6), not Xray's 512 KiB a direction.
+		level["bufferSize"] = kib
+	}
+	stats := false
 	if m.Traffic {
 		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user,
 		// read by rayd on the same API socket. Counters only: nothing of
 		// destinations.
 		level["statsUserUplink"], level["statsUserDownlink"] = true, true
+		stats = true
 	}
 	if !m.ConnLimitOff {
 		// The per-user connection limits (spec/conn-limit-v1.md §3.3, the
@@ -1647,10 +1669,13 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		// the stats (user>>>u5>>>limit>>>tcp, made at the first one), which
 		// rayd reads with the bytes. Off: no limiter at all.
 		level["limits"] = XrayConnLimits
+		stats = true
 	}
 	if len(level) > 0 {
-		cfg["stats"] = map[string]any{}
 		cfg["policy"] = map[string]any{"levels": map[string]any{"0": level}}
+	}
+	if stats {
+		cfg["stats"] = map[string]any{}
 		cfg["api"] = map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService", "StatsService"}}
 	}
 	b, err := jsonFile(cfg)
@@ -2358,4 +2383,20 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 			Reload: true, Needed: true},
 	)
 	return files, nil
+}
+
+// xrayBufferKiB is each Xray connection's buffer in KiB
+// (policy.levels.0.bufferSize), 0 for Xray's own (SetXrayBuffer).
+var xrayBufferKiB atomic.Int64
+
+// SetXrayBuffer sizes each Xray connection's buffer by the memory of a
+// data unit (docs/spec/memory-v1.md §6, unitMemory in bytes, 0 when not
+// known: Xray's own): 1024 connections both ways fit in it, 64 to 256
+// KiB. rayd sets it at its start, from the host's memory.
+func SetXrayBuffer(unitMemory int64) {
+	if unitMemory <= 0 {
+		xrayBufferKiB.Store(0)
+		return
+	}
+	xrayBufferKiB.Store(min(max(unitMemory>>21, 64), 256))
 }

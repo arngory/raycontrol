@@ -306,6 +306,9 @@ func groups(gs []string) string {
 // units from the templates below and nothing else.
 func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 	plan := Plan{Conntrack: true}
+	// The node's memory (docs/spec/memory-v1.md §4): the units' limits,
+	// and what the processes size by them; none without the host's.
+	mem := MemoryOf(in.MemTotal)
 	services, warnings := in.checked()
 	plan.Warnings = warnings
 	var inner *ServiceInput
@@ -348,7 +351,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 			plan.Warnings = append(plan.Warnings, s.SlipstreamError)
 			return true
 		}
-		if _, err := slipstreamArgs(s, inner.Name, p); err != nil {
+		if _, err := slipstreamArgs(s, inner.Name, p, mem.Unit); err != nil {
 			plan.Warnings = append(plan.Warnings, err.Error())
 			return true
 		}
@@ -589,7 +592,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		exec := bin.NikoServer + " backend -c " + needs
 		description := "niko-server backend " + s.Name + " (" + s.Kind + ")"
 		if s.Kind == "slipstream" {
-			args, _ := slipstreamArgs(s, inner.Name, p) // checked above
+			args, _ := slipstreamArgs(s, inner.Name, p, mem.Unit) // checked above
 			needs = path.Join(p.Rendered, s.Name, render.SlipstreamCert)
 			exec = bin.Slipstream + " " + strings.Join(args, " ")
 			description = "slipstream server " + s.Name + " (behind the DNS front)"
@@ -781,7 +784,6 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 	}
 	// Each unit's memory (docs/spec/memory-v1.md §4), the data units in
 	// their slice; none without the host's memory.
-	mem := MemoryOf(in.MemTotal)
 	if mem.Total > 0 && len(units) > 0 {
 		plan.Files = append(plan.Files, mem.sliceFile())
 	}
@@ -847,12 +849,12 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 // slipstreamArgs are a slipstream server's arguments from its settings,
 // checked again (render.SlipstreamArgs reads them from the service's
 // JSON).
-func slipstreamArgs(s ServiceInput, inner string, p render.Paths) ([]string, error) {
+func slipstreamArgs(s ServiceInput, inner string, p render.Paths, unitMemory int64) ([]string, error) {
 	settings, err := json.Marshal(s.Slipstream)
 	if err != nil {
 		return nil, err
 	}
-	return render.SlipstreamArgs(render.Service{Service: store.Service{Kind: s.Kind, Name: s.Name, Settings: string(settings)}}, inner, p)
+	return render.SlipstreamArgs(render.Service{Service: store.Service{Kind: s.Kind, Name: s.Name, Settings: string(settings)}}, inner, p, unitMemory)
 }
 
 // tmpfiles is the tmpfiles.d file of the plan, and the directories it makes.

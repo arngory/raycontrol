@@ -1424,3 +1424,62 @@ func TestCredentialNamesAcrossRotation(t *testing.T) {
 		s0 = s3
 	}
 }
+
+// Each Xray connection's buffer by a data unit's memory (docs/spec/memory-v1.md
+// §6): 1024 connections both ways fit, 64 to 256 KiB; none set, Xray's own.
+// The stats and the API stay as the traffic and the limits want them.
+func TestXrayBuffer(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true,
+		Settings: `{"target":"www.example.org:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { render.SetXrayBuffer(0) })
+	level := func() (map[string]any, bool) {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "/var/lib/raycontrol/rendered/r/xray.json" {
+				var cfg struct {
+					Policy struct {
+						Levels map[string]map[string]any `json:"levels"`
+					} `json:"policy"`
+					API map[string]any `json:"api"`
+				}
+				if err := json.Unmarshal(f.Content, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				return cfg.Policy.Levels["0"], cfg.API != nil
+			}
+		}
+		t.Fatal("no xray.json for r")
+		return nil, false
+	}
+	for _, c := range []struct {
+		unit int64
+		want any // KiB, or nil for none
+	}{
+		{0, nil},
+		{128 << 20, 64.0},  // 64
+		{313 << 20, 156.0}, // 313 MiB / 2 MiB
+		{2 << 30, 256.0},   // 1024: 256 at most
+		{16 << 20, 64.0},   // 8: 64 at least
+	} {
+		render.SetXrayBuffer(c.unit)
+		l, api := level()
+		if got := l["bufferSize"]; got != c.want {
+			t.Errorf("unit %d MiB: bufferSize %v, want %v", c.unit>>20, got, c.want)
+		}
+		if _, limits := l["limits"]; !limits || !api {
+			t.Errorf("unit %d MiB: limits %v, API %v", c.unit>>20, limits, api)
+		}
+	}
+}

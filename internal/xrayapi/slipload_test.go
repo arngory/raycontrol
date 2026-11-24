@@ -135,7 +135,7 @@ func slipLoad(t *testing.T, niko, server, client string, n int, span time.Durati
 		}
 	}()
 
-	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", paths)
+	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", paths, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

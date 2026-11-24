@@ -103,7 +103,10 @@ func main() {
 	switch os.Args[1] {
 	case "serve", "site", "naive", "relay":
 		// The Go memory limit from the unit's cgroup (docs/spec/memory-v1.md §3).
-		memlimit.Start(logx.New(os.Stderr, slog.LevelInfo))
+		l := memlimit.Start(logx.New(os.Stderr, slog.LevelInfo))
+		// Xray's connection buffers by a data unit's memory, as rayctl
+		// apply sizes the units from the host's (§4, §6).
+		render.SetXrayBuffer(deploy.MemoryOf(l.MemTotal).Unit)
 	}
 	var err error
 	switch os.Args[1] {
