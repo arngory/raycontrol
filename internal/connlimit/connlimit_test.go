@@ -346,3 +346,32 @@ func TestMonitorConntrack(t *testing.T) {
 		t.Fatalf("after a day: %q", l)
 	}
 }
+
+// Hysteria2's kinds (niko-server v0.19.3) are read; a kind rayd doesn't
+// know is still left out.
+func TestMonitorHysteriaKinds(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	proc := t.TempDir()
+	fakeProc(t, proc, 1000, 65536, cpu(0, 0), cpu(0, 0))
+	limits := map[string]map[string]int64{"u5": {"conns": 2, "pending": 1, "memory": 4, "later": 9}}
+	m := &Monitor{
+		Sources: func(context.Context) ([]Source, error) {
+			return []Source{{Service: "hy", Read: func(context.Context) (Reading, error) {
+				return Reading{Boot: "b1", Age: 5 * time.Second, AgeKnown: true, Limits: limits}, nil
+			}}}, nil
+		},
+		Off:    func(context.Context) (bool, error) { return false, nil },
+		Health: &health.Board{Now: func() time.Time { return now }}, Log: slog.New(slog.DiscardHandler), Proc: proc,
+		Now: func() time.Time { return now },
+	}
+	m.Round(context.Background())
+	s := m.Snapshot()
+	for kind, want := range map[string]uint64{"conns": 2, "pending": 1, "memory": 4, "later": 0} {
+		if got := s.Refused[[2]string{"hy", kind}]; got != want {
+			t.Errorf("%s: %d, want %d", kind, got, want)
+		}
+	}
+	if len(s.Users) != 1 || s.Users[0].Refused != 7 {
+		t.Errorf("users %+v", s.Users)
+	}
+}
