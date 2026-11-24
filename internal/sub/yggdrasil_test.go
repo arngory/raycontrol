@@ -382,7 +382,7 @@ func TestBrutalCeilings(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := func(link ...int) map[string]any {
-		m, _ := render.Collect(ctx, st)
+		m, _ := render.CollectForRender(ctx, st)
 		if len(link) > 0 {
 			m.LinkMbps = link[0]
 		}

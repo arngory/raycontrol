@@ -655,8 +655,10 @@ func TestUninstallUFW(t *testing.T) {
 }
 
 // Hysteria2 on Xray (R3-1): the key copied in by root, the bind capability
-// only for UDP 443.
+// only for UDP 443. hy2-obfs with one password for the service, as before
+// niko-server v0.19.3 (TestBuildHysteriaSalamanderDevice from it).
 func TestBuildHysteria(t *testing.T) {
+	defer render.UseNikoServer("v0.19.2")()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {
