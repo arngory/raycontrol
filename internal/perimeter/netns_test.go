@@ -1538,7 +1538,12 @@ func dialAs(uid int, addr [4]byte, port int) error {
 	defer unix.Close(fd)
 	tv := unix.Timeval{Sec: 2}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
-	return unix.Connect(fd, &unix.SockaddrInet4{Port: port, Addr: addr})
+	err = unix.Connect(fd, &unix.SockaddrInet4{Port: port, Addr: addr})
+	if errors.Is(err, syscall.EINTR) {
+		// As in connAs: Go's preemption cut the wait, the connect goes on.
+		err = connectOutcome(fd, 2*time.Second)
+	}
+	return err
 }
 
 // The node's own check of its DNS zones (dnscheck) under the real ruleset:
