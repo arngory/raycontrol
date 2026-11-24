@@ -1756,6 +1756,18 @@ func TestBuildSlipstream(t *testing.T) {
 	if !strings.Contains(file(p, "/etc/systemd/system/niko-front.service"), "After=network-online.target niko-slip.service") {
 		t.Error("the front does not start after the server")
 	}
+	// On a host of 1 GiB (docs/spec/memory-v1.md §6): the unit's 313 MiB,
+	// a quarter queued towards inner (64 at most), 256 connections fit.
+	in := deploy.InputsOf(m, files, render.DefaultPaths)
+	in.MemTotal = 1 << 30
+	mp := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
+	if err := mp.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if u := file(mp, "/etc/systemd/system/niko-slip.service"); !strings.Contains(u, " --max-connections 256 --max-connections-per-device 4 --max-pending-mib 64\n") ||
+		!strings.Contains(u, "Slice=raycontrol-data.slice\n") || !strings.Contains(u, "OOMScoreAdjust=200\n") {
+		t.Errorf("slip unit on 1 GiB:\n%s", u)
+	}
 	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/slip-in 2750 niko-slip niko-front -") {
 		t.Error("no socket directory for the front")
 	}

@@ -143,7 +143,7 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	waitFile(t, paths.InnerSocket("inner"))
 
 	// The server, with the unit's arguments; the front is this user.
-	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", paths)
+	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", paths, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

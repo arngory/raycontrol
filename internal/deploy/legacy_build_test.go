@@ -75,7 +75,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (slipstream) needs the inner stage", s.Name))
 			return true
 		}
-		if _, err := render.SlipstreamArgs(s, inner.Name, p); err != nil {
+		if _, err := render.SlipstreamArgs(s, inner.Name, p, 0); err != nil {
 			plan.Warnings = append(plan.Warnings, err.Error())
 			return true
 		}
@@ -295,7 +295,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		exec := bin.NikoServer + " backend -c " + needs
 		description := "niko-server backend " + s.Name + " (" + s.Kind + ")"
 		if s.Kind == "slipstream" {
-			args, _ := render.SlipstreamArgs(s, inner.Name, p) // checked above
+			args, _ := render.SlipstreamArgs(s, inner.Name, p, 0) // checked above
 			needs = path.Join(p.Rendered, s.Name, render.SlipstreamCert)
 			exec = bin.Slipstream + " " + strings.Join(args, " ")
 			description = "slipstream server " + s.Name + " (behind the DNS front)"

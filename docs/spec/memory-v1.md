@@ -107,7 +107,9 @@ apply — сам, от root, а не со слов rayd. Из неё:
 4. raycontrol B: slice, `Memory*`, `OOMScoreAdjust`, `OOMPolicy`, своп по настройке, `Plan.Check` и fuzz,
    `rayctl check` (бюджет, сумма сервисов, расхождение с cgroup), `bufferSize` Xray, аргументы slipstream, установка в
    контейнерах с пределом. **Сделано:** slice, `Memory*`, `OOMScoreAdjust`, `OOMPolicy`, `Plan.Check` и fuzz (§4).
-   Осталось: своп, `rayctl check`, `bufferSize` Xray, аргументы slipstream, юниты relay, установка с пределом в CI.
+   Аргументы slipstream (§6): `--max-pending-mib` — четверть предела юнита, 8–64; `--max-connections` — не больше, чем
+   помещается по 400 КиБ, 16 и больше. Осталось: своп, `rayctl check`, `bufferSize` Xray, юниты relay, установка с
+   пределом в CI.
 5. raycontrol C: naive — давление и решение по состоянию потока (§5).
 6. raycontrol D: DoH в отдельный юнит (решение §9 п. 4).
 7. С XHTTP: его пределы и бюджет загрузок в форке.

@@ -144,7 +144,7 @@ func TestRenderSlipstream(t *testing.T) {
 		t.Errorf("backend %+v", b)
 	}
 
-	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", p)
+	args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", p, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +158,28 @@ func TestRenderSlipstream(t *testing.T) {
 	// The limits as set (rayctl service set).
 	set := slip
 	set.Settings = strings.TrimSuffix(slip.Settings, "}") + `,"max_connections":256,"device_connections":2}`
-	if args, err := render.SlipstreamArgs(render.Service{Service: set}, "inner", p); err != nil ||
+	if args, err := render.SlipstreamArgs(render.Service{Service: set}, "inner", p, 0); err != nil ||
 		!slices.Equal(args[len(args)-4:], []string{"--max-connections", "256", "--max-connections-per-device", "2"}) {
 		t.Errorf("args with limits %q %v", args, err)
+	}
+	// The unit's memory (docs/spec/memory-v1.md §6): a quarter of it queued
+	// towards the inner stage, 8–64 MiB; no more connections than fit at
+	// 400 KiB each, 16 at least.
+	for _, c := range []struct {
+		memory                 int64
+		conns, device, pending string
+	}{
+		{128 << 20, "256", "4", "32"}, // 327 fit: as set
+		{64 << 20, "163", "4", "16"},  // 163 fit
+		{1 << 30, "256", "4", "64"},   // a quarter is 256 MiB: 64
+		{16 << 20, "40", "4", "8"},    // 40 fit; a quarter is 4 MiB: 8
+		{4 << 20, "16", "4", "8"},     // 10 fit: 16 at least
+	} {
+		args, err := render.SlipstreamArgs(render.Service{Service: slip}, "inner", p, c.memory)
+		want := []string{"--max-connections", c.conns, "--max-connections-per-device", c.device, "--max-pending-mib", c.pending}
+		if err != nil || !slices.Equal(args[len(args)-6:], want) {
+			t.Errorf("%d MiB: args %q %v, want them to end %q", c.memory>>20, args, err, want)
+		}
 	}
 	if got := render.UnservedZones(m); len(got) != 0 {
 		t.Errorf("unserved %v", got)

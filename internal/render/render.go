@@ -1374,14 +1374,23 @@ func slipstreamFiles(s Service, p Paths) ([]File, error) {
 // dnsauth-v2 field the front checked skipped, the streams to the inner
 // stage, its own certificate, zone and ALPN, its connections at once and a
 // device's (the device the front names); the other limits are the
-// server's defaults.
-func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
+// server's defaults. With the unit's memory limit (unitMemory, 0 when not
+// known; docs/spec/memory-v1.md §6) the bytes queued towards the inner
+// stage are a quarter of it, 8–64 MiB, and the connections no more than
+// fit in it at some 400 KiB each.
+func SlipstreamArgs(s Service, inner string, p Paths, unitMemory int64) ([]string, error) {
 	ss, err := provision.ParseSlipstream(s.Service)
 	if err != nil {
 		return nil, fmt.Errorf("service %s: %w", s.Name, err)
 	}
 	total, device := ss.Connections()
-	return []string{
+	var pending []string
+	if unitMemory > 0 {
+		total = min(total, max(int(unitMemory/slipstreamConnectionMemory), provision.MinSlipstreamConnections))
+		device = min(device, total)
+		pending = []string{"--max-pending-mib", strconv.FormatInt(min(max(unitMemory/4>>20, 8), 64), 10)}
+	}
+	return append([]string{
 		"--front-socket", p.FrontSocket(s.Name, "packet"),
 		"--front-uid", strconv.Itoa(p.PeerUID(FrontUID)),
 		"--tag-len", "8",
@@ -1392,8 +1401,13 @@ func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
 		"--alpn", ss.ALPN,
 		"--max-connections", strconv.Itoa(total),
 		"--max-connections-per-device", strconv.Itoa(device),
-	}, nil
+	}, pending...), nil
 }
+
+// slipstreamConnectionMemory is what a slipstream connection may hold
+// (docs/spec/memory-v1.md §6): picoquic's state and buffers, its share of
+// the queue towards the inner stage.
+const slipstreamConnectionMemory = 400 << 10
 
 // dnsBackend renders a DNS tunnel's backend for its zones, the main one
 // first.
