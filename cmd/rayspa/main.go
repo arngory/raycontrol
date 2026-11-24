@@ -29,6 +29,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/logx"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -97,6 +98,7 @@ func run(args []string) error {
 	dl := &debugLevel{always: *debug}
 	dl.level.Set(map[bool]slog.Level{false: slog.LevelInfo, true: slog.LevelDebug}[*debug])
 	log := logx.New(os.Stderr, &dl.level)
+	memlimit.Start(log) // the Go memory limit from the unit's cgroup (docs/spec/memory-v1.md §3)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

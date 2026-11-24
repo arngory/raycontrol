@@ -45,6 +45,7 @@ import (
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/logx"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
@@ -98,6 +99,11 @@ func main() {
 	if err := pprofx.Start(logx.New(os.Stderr, slog.LevelInfo)); err != nil {
 		fmt.Fprintln(os.Stderr, "rayd:", err)
 		os.Exit(1)
+	}
+	switch os.Args[1] {
+	case "serve", "site", "naive", "relay":
+		// The Go memory limit from the unit's cgroup (docs/spec/memory-v1.md §3).
+		memlimit.Start(logx.New(os.Stderr, slog.LevelInfo))
 	}
 	var err error
 	switch os.Args[1] {

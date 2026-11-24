@@ -83,9 +83,11 @@
 ## 8. Шаги
 
 1. niko-server: помощник памяти, `GOMEMLIMIT` фронта и бэкендов, доли Hysteria2 и Yggdrasil, полы внутри бюджета,
-   niko-loadgen на cgroup v2.
-2. Форк Xray (`raycontrol/v26.11.9`): помощник памяти; FORK.md и пин.
-3. raycontrol A: помощник в rayd, naive, сайте, rayspa.
+   niko-loadgen на cgroup v2. **Сделано:** niko-server v0.19.3.
+2. Форк Xray (`raycontrol/v26.11.9`): помощник памяти; FORK.md и пин. **Сделано:** `common/memlimit`, FORK.md §6
+   (arngory/Xray-core#10), пин `4eed279`.
+3. raycontrol A: помощник в rayd, naive, сайте, rayspa. **Сделано:** `internal/memlimit`; `rayd serve`, `site`,
+   `naive`, `relay` и `rayspa run` ставят предел Go 7/8 от предела cgroup.
 4. raycontrol B: slice, `Memory*`, `OOMScoreAdjust`, `OOMPolicy`, своп по настройке, `Plan.Check` и fuzz,
    `rayctl check` (бюджет, сумма сервисов, расхождение с cgroup), `bufferSize` Xray, аргументы slipstream, установка в
    контейнерах с пределом.
