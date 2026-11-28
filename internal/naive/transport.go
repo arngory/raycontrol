@@ -1,7 +1,10 @@
 package naive
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/site"
 )
@@ -49,9 +52,32 @@ const (
 // (site.IdleTimeout: a connection without a stream; a tunnel has no idle
 // time of its own, it lasts as long as its destination and its client
 // keep it), and each connection's socket known to its streams
-// (datagramStream). TLS and the error log are the caller's.
+// (datagramStream, the tunnels' charge). TLS and the error log are the
+// caller's.
+//
+// A client that is gone and leaves its data unacknowledged ends its
+// connection after clientTimeout (TCP_USER_TIMEOUT, Linux): its tunnels'
+// memory goes with it, with no timer on the tunnels themselves. It says
+// nothing on the wire.
 func (s *Server) HTTPServer() *http.Server {
 	srv := site.HTTPServer(s, site.IdleTimeout)
-	srv.ConnContext = connContext
+	srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		ctx = connContext(ctx, c)
+		if cs, _ := ctx.Value(connSocketKey{}).(*connSocket); cs != nil {
+			var err error
+			if cerr := cs.rc.Control(func(fd uintptr) { err = setUserTimeout(fd, clientTimeout) }); cerr != nil {
+				err = cerr
+			}
+			if err != nil && s.Log != nil {
+				s.Log.Debug("naive: TCP_USER_TIMEOUT not set", "err", err)
+			}
+		}
+		return ctx
+	}
 	return srv
 }
+
+// clientTimeout is how long a client's connection may leave the server's
+// data unacknowledged: as long as an HTTP/3 connection may be silent
+// (render.QUICIdle).
+const clientTimeout = 2 * time.Minute

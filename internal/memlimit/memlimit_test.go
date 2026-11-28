@@ -263,3 +263,53 @@ func TestSetGoLimit(t *testing.T) {
 		})
 	}
 }
+
+// Base and Throttle: the less of High and 15/16 of Max, and High or else
+// 15/16 of Max; none without a limit below the host.
+func TestBaseThrottle(t *testing.T) {
+	const host = 16 << 30
+	for _, c := range []struct {
+		l              Limits
+		base, throttle int64
+	}{
+		{Limits{MemTotal: host}, 0, 0},
+		{Limits{Max: 32 << 30, MemTotal: host}, 0, 0},
+		{Limits{Max: 1 << 30, MemTotal: host}, 960 * mib, 960 * mib},
+		{Limits{Max: 1 << 30, High: 896 * mib, MemTotal: host}, 896 * mib, 896 * mib},
+		{Limits{Max: 512 * mib, High: 1 << 30, MemTotal: host}, 480 * mib, 1 << 30},
+		{Limits{High: 512 * mib, MemTotal: host}, 512 * mib, 512 * mib},
+	} {
+		if got := c.l.Base(); got != c.base {
+			t.Errorf("%+v: base %d MiB, want %d MiB", c.l, got/mib, c.base/mib)
+		}
+		if got := c.l.Throttle(); got != c.throttle {
+			t.Errorf("%+v: throttle %d MiB, want %d MiB", c.l, got/mib, c.throttle/mib)
+		}
+	}
+}
+
+// StatFile is the process's own cgroup's memory.stat (or the nearest
+// ancestor's), none on cgroup v1; Sock reads its sock line.
+func TestStatFile(t *testing.T) {
+	tr, p := newTree(t, "0::/raycontrol.slice/naive.service\n")
+	if f := StatFile(p); f != "" {
+		t.Fatalf("no file: %q", f)
+	}
+	tr.write("fs/raycontrol.slice/memory.stat", "anon 1\nsock 4096\n")
+	if f := StatFile(p); f != tr.path("fs/raycontrol.slice/memory.stat") {
+		t.Fatalf("the ancestor's: %q", f)
+	}
+	tr.write("fs/raycontrol.slice/naive.service/memory.stat", "anon 5\nsock 12288\nshmem 0\n")
+	f := StatFile(p)
+	if n, err := Sock(f); f != tr.path("fs/raycontrol.slice/naive.service/memory.stat") || n != 12288 || err != nil {
+		t.Fatalf("its own: %q %d %v", f, n, err)
+	}
+	tr.write("fs/raycontrol.slice/naive.service/memory.stat", "anon 5\n")
+	if _, err := Sock(f); err == nil {
+		t.Fatal("no sock line read")
+	}
+	_, v1 := newTree(t, "4:memory:/naive\n")
+	if f := StatFile(v1); f != "" {
+		t.Fatalf("v1: %q", f)
+	}
+}

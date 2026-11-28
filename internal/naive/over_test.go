@@ -68,8 +68,10 @@ func h3Options() h3serve.Options {
 
 // window, when not 0, is a client's receive window for a stream and for a
 // connection: a client that does not read stops the server's writes at
-// it.
-type clientOpts struct{ window int }
+// it. connWindow, when not 0, is the connection's instead: room for the
+// answers of more streams while some do not read (QUIC's HEADERS are
+// flow-controlled).
+type clientOpts struct{ window, connWindow int }
 
 // serveOver serves h over the test's transport (protoOf) and gives the URL
 // of the service and a client of it.
@@ -82,8 +84,12 @@ func serveOver(t *testing.T, h *Server, opts ...clientOpts) (string, http.RoundT
 	switch proto := protoOf(t); proto {
 	case "h2":
 		tr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: testClientTLS("h2")}
+		conn := o.connWindow
+		if conn == 0 {
+			conn = o.window
+		}
 		if o.window > 0 {
-			tr.HTTP2 = &http.HTTP2Config{MaxReceiveBufferPerStream: o.window, MaxReceiveBufferPerConnection: o.window}
+			tr.HTTP2 = &http.HTTP2Config{MaxReceiveBufferPerStream: o.window, MaxReceiveBufferPerConnection: conn}
 		}
 		t.Cleanup(tr.CloseIdleConnections)
 		return serveNaive(t, h), tr
@@ -95,15 +101,30 @@ func serveOver(t *testing.T, h *Server, opts ...clientOpts) (string, http.RoundT
 		cert := testCert(t)
 		ctx, stop := context.WithCancel(context.Background())
 		done := make(chan error, 1)
+		// The tunnels' connections and the window hook, as rayd wires them
+		// (cmd/rayd naiveH3Conn, quicOptions.window).
+		if h.H3Conn == nil {
+			h.H3Conn = func(ctx context.Context) any {
+				if c := h3serve.Conn(ctx); c != nil {
+					return c
+				}
+				return nil
+			}
+		}
+		so := h3Options()
+		so.Window = func(c *quic.Conn, done <-chan struct{}, delta uint64) bool { return h.AllowH3Window(c, done, delta) }
 		go func() {
-			done <- h3serve.Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, h, h3Options())
+			done <- h3serve.Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, h, so)
 		}()
 		addr := pc.LocalAddr().String()
 		qc := &quic.Config{MaxIdleTimeout: 30 * time.Second}
 		if o.window > 0 {
-			w := uint64(o.window) //nolint:gosec // G115: a test's window
+			w, c := uint64(o.window), uint64(o.window) //nolint:gosec // G115: a test's window
+			if o.connWindow > 0 {
+				c = uint64(o.connWindow) //nolint:gosec // G115: a test's window
+			}
 			qc.InitialStreamReceiveWindow, qc.MaxStreamReceiveWindow = w, w
-			qc.InitialConnectionReceiveWindow, qc.MaxConnectionReceiveWindow = w, w
+			qc.InitialConnectionReceiveWindow, qc.MaxConnectionReceiveWindow = c, c
 		}
 		tr := &http3.Transport{TLSClientConfig: testClientTLS(), QUICConfig: qc,
 			Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {

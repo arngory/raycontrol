@@ -58,6 +58,27 @@ type Reading struct {
 	// from the others, and where the field is not sane: a bad one costs
 	// the bytes nothing.
 	UDP *naive.UDPStats
+	// Memory are rayd naive's TCP tunnels' budget, charge and pressure,
+	// and the CONNECTs refused and tunnels reset by them since it started
+	// (spec/memory-v1.md §5, the line's "memory", from v0.37.0): counts
+	// only. nil from the others, and where the field is not sane.
+	Memory *naive.MemoryStats
+}
+
+// parseMemory reads the line's "memory", nil when it is not there or not
+// sane: counts below zero become zero.
+func parseMemory(raw json.RawMessage) *naive.MemoryStats {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var m naive.MemoryStats
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	for _, p := range []*int64{&m.Budget, &m.Charge, &m.Refused, &m.Evicted} {
+		*p = max(*p, 0)
+	}
+	return &m
 }
 
 // maxDropReasons bounds the reasons of a UDP answer: naive has ten.
@@ -129,7 +150,8 @@ var ErrNoCounters = errors.New("no byte counters (niko-server before v0.15.0?)")
 // answered by one JSON line {"v": 1, "boot": "...", "users": {"u5": {"up":
 // N, "down": N}}} (niko-server v0.15.0's Hysteria2 backends, rayd naive),
 // with "limit" and "uptime" from rayd naive v0.24.0 and niko-server v0.17.0,
-// and "udp" from rayd naive v0.30.0 with udp=on (Reading.UDP).
+// "udp" from rayd naive v0.30.0 with udp=on (Reading.UDP), and "memory"
+// from rayd naive v0.37.0 (Reading.Memory).
 func ReadLine(ctx context.Context, path string) (Reading, error) {
 	body, err := ask(ctx, path)
 	if err != nil {
@@ -213,7 +235,8 @@ func parseLine(body []byte) (Reading, error) {
 		Limit  map[string]map[string]int64 `json:"limit"`
 		Uptime *int64                      `json:"uptime"`
 		// Read on its own (parseUDP): a bad one leaves the bytes be.
-		UDP json.RawMessage `json:"udp"`
+		UDP    json.RawMessage `json:"udp"`
+		Memory json.RawMessage `json:"memory"`
 	}
 	// The decoder's error is not passed on: it may quote the answer (a
 	// key's path), and it goes to rayctl status.
@@ -230,7 +253,7 @@ func parseLine(body []byte) (Reading, error) {
 	if len(a.Users) > maxNames {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(a.Users), maxNames)
 	}
-	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users)), UDP: parseUDP(a.UDP)}
+	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users)), UDP: parseUDP(a.UDP), Memory: parseMemory(a.Memory)}
 	if a.Uptime != nil && *a.Uptime >= 0 && *a.Uptime < 1<<40 {
 		r.Age, r.AgeKnown = time.Duration(*a.Uptime)*time.Second, true
 	}

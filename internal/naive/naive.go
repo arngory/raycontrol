@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/site"
 )
@@ -73,6 +74,16 @@ type Server struct {
 
 	udp       udpTotals
 	udpSocket func(ctx context.Context) (*net.UDPConn, error) // a request's socket; uotSocket's unconnected one when nil
+
+	// Memory is the process's memory (memlimit.Start's), the TCP tunnels'
+	// budget's base (MemoryBudget, pressure.go); memlimit.Read's at the
+	// first tunnel when nil. H3Conn gives an HTTP/3 request's connection
+	// (cmd/rayd: h3serve.Conn), whose window caps its tunnels' charge; a
+	// tunnel over HTTP/3 without it is charged on its own.
+	Memory  *memlimit.Limits
+	H3Conn  func(ctx context.Context) any
+	mem     tunnels
+	memOnce sync.Once
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -148,8 +159,25 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	tcp := host != UoTName && host != uotLegacyName && host != ICMPName
 	// With the limits off a lookup takes no token: paid from the start.
 	paid := s.lim.off.Load()
+	var mem *tunnelMem
 	if tcp {
-		done, kind := s.lim.tcpStart(r.Context(), a.key)
+		// The tunnel's memory (pressure.go): charged from here to its end,
+		// refused before any 200 when the node is at its budget and the
+		// user at its share, whatever the limits' switch; reset under
+		// pressure (errEvicted).
+		var evict context.CancelCauseFunc
+		ctx, evict = context.WithCancelCause(ctx)
+		defer evict(nil)
+		tm := s.tunnels().admit(a.key, s.connOf(r), r.ProtoMajor == 3, evict)
+		if tm == nil {
+			s.lim.refuse(a.key, refusedMemory)
+			s.Log.Debug("naive: tunnels at the memory budget")
+			refuse(w, http.StatusTooManyRequests, "", reply)
+			return false
+		}
+		defer s.mem.leave(tm)
+		mem = tm
+		done, kind := s.lim.tcpStart(ctx, a.key)
 		if kind == "" && !s.lim.off.Load() && s.Dial == nil && (s.Probe == "" || host != probe.Name) {
 			if _, err := netip.ParseAddr(host); err != nil && !s.cached(host) {
 				if !s.lim.lookup(a.key) {
@@ -158,6 +186,9 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 				}
 				paid = true
 			}
+		}
+		if kind != "" && errors.Is(context.Cause(ctx), errEvicted) {
+			panic(http.ErrAbortHandler)
 		}
 		if kind != "" {
 			// Not who or where: no user and no destination in the log.
@@ -260,8 +291,11 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	// tunnel lasts until the destination is done sending, or the stream
 	// ends. Nothing writes to w once this returns. The bytes count at the
 	// destination's side, as each write goes (traffic-limit-v1 §2.3).
+	// Each write's start is noted (pressure.go): a write that does not
+	// return is a tunnel that holds memory and does not move.
+	s.mem.run(mem, out)
 	go func() {
-		_, _ = io.Copy(countWriter{out, a.traffic.up()}, in)
+		_, _ = io.Copy(stampWriter{countWriter{out, a.traffic.up()}, &mem.up}, in)
 		if cw, ok := out.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -272,7 +306,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	down := make(chan error, 1)
 	go func() {
 		from := &brokenReader{r: countReader{out, a.traffic.down()}}
-		_, _ = io.Copy(in, from)
+		_, _ = io.Copy(stampWriter{in, &mem.down}, from)
 		down <- from.err
 	}()
 	select {
@@ -298,8 +332,30 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
 			<-down //nolint:errcheck // only its end is waited for
 		}
+		// Reset under pressure: a reset, never the end of what was cut
+		// off.
+		if errors.Is(context.Cause(ctx), errEvicted) {
+			panic(http.ErrAbortHandler)
+		}
 	}
 	return true
+}
+
+// connOf is the connection a request came on, for its tunnel's charge:
+// HTTP/2's socket, HTTP/3's connection (H3Conn); nil when not known.
+func (s *Server) connOf(r *http.Request) any {
+	if r.ProtoMajor == 3 {
+		if s.H3Conn != nil {
+			if c := s.H3Conn(r.Context()); c != nil {
+				return c
+			}
+		}
+		return nil
+	}
+	if c, _ := r.Context().Value(connSocketKey{}).(*connSocket); c != nil {
+		return c
+	}
+	return nil
 }
 
 // brokenReader keeps the error its reader ended with, if it was not its

@@ -15,6 +15,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/arngory/raycontrol/internal/h3serve"
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/quiccid"
 	"github.com/arngory/raycontrol/internal/render"
@@ -38,16 +39,36 @@ type quicOptions struct {
 	// connIDs makes the server's connection IDs with the service's label
 	// (h3serve.Options.ConnIDs, spec/quic-cid-route-v1.md); nil: random.
 	connIDs quic.ConnectionIDGenerator
+	// window is asked before a connection's receive window grows
+	// (h3serve.Options.Window): naive's tunnels' budget
+	// (naive.Server.AllowH3Window); nil for DoH3.
+	window func(conn any, done <-chan struct{}, delta uint64) bool
 }
+
+// procMemory is the process's memory as memlimit.Start read it.
+var procMemory memlimit.Limits
 
 // h3Options are o with what both servers share: an idle time the front
 // outlasts (render.QUICIdle, render.FrontUDPIdle), room for all the
 // requests a naive user may have at once (naive.MaxStreams), and naive's
 // bounds of the streams without a header and of a header.
 func h3Options(o quicOptions) h3serve.Options {
-	return h3serve.Options{ResetKey: o.resetKey, HeaderWait: o.headerWait, Idle: render.QUICIdle,
+	h := h3serve.Options{ResetKey: o.resetKey, HeaderWait: o.headerWait, Idle: render.QUICIdle,
 		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes,
 		Datagrams: o.datagrams, ConnIDs: o.connIDs}
+	if o.window != nil {
+		h.Window = func(c *quic.Conn, done <-chan struct{}, delta uint64) bool { return o.window(c, done, delta) }
+	}
+	return h
+}
+
+// naiveH3Conn gives naive an HTTP/3 request's connection (naive.Server.H3Conn):
+// h3serve's, nil for none.
+func naiveH3Conn(ctx context.Context) any {
+	if c := h3serve.Conn(ctx); c != nil {
+		return c
+	}
+	return nil
 }
 
 // connIDs is the generator of a QUIC server's connection IDs with its

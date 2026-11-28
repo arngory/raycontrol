@@ -11,6 +11,7 @@ package memlimit
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"path"
 	"slices"
@@ -235,14 +236,31 @@ const GoLimitFloor = 64 << 20
 // limit below the host, where a limit from the host's memory would do
 // nothing.
 func (l Limits) GoLimit(num, den int64) int64 {
-	base := l.below(l.High)
-	if m := l.below(l.Max) / 16 * 15; m > 0 && (base == 0 || m < base) {
-		base = m
-	}
+	base := l.Base()
 	if base == 0 || num <= 0 || den <= 0 {
 		return 0
 	}
 	return max(base/den*num, GoLimitFloor)
+}
+
+// Base is what the Go memory limit and the budgets are shares of: the less
+// of High and 15/16 of Max, each below the host; 0 without either.
+func (l Limits) Base() int64 {
+	base := l.below(l.High)
+	if m := l.below(l.Max) / 16 * 15; m > 0 && (base == 0 || m < base) {
+		base = m
+	}
+	return base
+}
+
+// Throttle is where the kernel starts to throttle the cgroup: High, or
+// without one 15/16 of Max (where Base puts the rest of a cgroup without
+// High); 0 without either.
+func (l Limits) Throttle() int64 {
+	if h := l.below(l.High); h > 0 {
+		return h
+	}
+	return l.below(l.Max) / 16 * 15
 }
 
 // SetGoLimit gives the runtime GoLimit(num, den) through set (the
@@ -258,4 +276,48 @@ func SetGoLimit(l Limits, num, den int64, getenv func(string) string, set func(i
 		set(n)
 	}
 	return n
+}
+
+// StatFile is the memory.stat of the process's own cgroup (v2) at p: the
+// first of its directory and its ancestors' that has one, as Read takes
+// the limits; "" on cgroup v1 or without one. naive reads the kernel's
+// socket buffers there (Sock).
+func StatFile(p Paths) string {
+	b, err := os.ReadFile(p.Cgroup)
+	if err != nil {
+		return ""
+	}
+	v2s, _ := mounts(p.Mountinfo)
+	for line := range strings.SplitSeq(string(b), "\n") {
+		f := strings.SplitN(line, ":", 3)
+		if len(f) < 3 || f[0] != "0" || f[1] != "" {
+			continue
+		}
+		m := pick(v2s, f[2], p.Root)
+		for dir := under(f[2], m.root); ; dir = path.Dir(dir) {
+			file := path.Join(m.point, dir, "memory.stat")
+			if _, err := os.Stat(file); err == nil {
+				return file
+			}
+			if dir == "/" {
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+// Sock is the sock line of a memory.stat: the kernel's socket buffers
+// charged to the cgroup, in bytes.
+func Sock(file string) (int64, error) {
+	b, err := os.ReadFile(file) //nolint:gosec // G304: a cgroup's memory.stat (StatFile)
+	if err != nil {
+		return 0, err
+	}
+	for line := range strings.SplitSeq(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "sock "); ok {
+			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		}
+	}
+	return 0, errors.New("memlimit: no sock in " + file)
 }

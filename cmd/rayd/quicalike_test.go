@@ -125,11 +125,12 @@ type quicFace struct {
 // password and no token: the same transport parameters, connection IDs of
 // the same length, the same HTTP/3 SETTINGS, the same answer to a request
 // that is not theirs, and a stateless reset from both for a packet of no
-// connection.
+// connection. naive's window hook (its tunnels' budget) changes none of
+// what a connection starts with.
 func TestQUICNamesLookAlike(t *testing.T) {
 	ns, cert := naiveTest(t, sink)
 	faces := quicFaces(t, map[string]string{
-		"naive-quic": serveQUIC(t, ns, cert, quicOptions{resetKey: testResetKey(t)}),
+		"naive-quic": serveQUIC(t, ns, cert, quicOptions{resetKey: testResetKey(t), window: ns.AllowH3Window}),
 		"DoH3":       serveQUIC(t, noTokens(), cert, quicOptions{resetKey: testResetKey(t)}),
 	})
 	n, d := faces["naive-quic"], faces["DoH3"]

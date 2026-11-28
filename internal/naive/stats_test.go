@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/memlimit"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/traffic"
@@ -147,5 +148,32 @@ func TestStatsUDP(t *testing.T) {
 	reasons[0] = "changed"
 	if naive.DropReasons()[0] != "bad" {
 		t.Fatal("DropReasons gave its own list away")
+	}
+}
+
+// The TCP tunnels' memory goes out with the bytes, counts only, as rayd
+// reads it (traffic.Reading.Memory); none until it is set.
+func TestStatsMemory(t *testing.T) {
+	dir := t.TempDir()
+	users := filepath.Join(dir, "users.json")
+	if err := os.WriteFile(users, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u := &naive.Users{Path: users}
+	sock := filepath.Join(dir, "stats.sock")
+	if err := u.ServeStats(t.Context(), sock, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := traffic.ReadLine(t.Context(), sock); err != nil || r.Memory != nil {
+		t.Fatalf("not set: %+v %v", r.Memory, err)
+	}
+	ns := &naive.Server{Users: u, Memory: &memlimit.Limits{Max: 256 << 20, MemTotal: 4 << 30}}
+	u.SetMemory(ns.MemoryStats)
+	r, err := traffic.ReadLine(t.Context(), sock)
+	if err != nil || r.Memory == nil {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if got := *r.Memory; got != (naive.MemoryStats{Budget: 120 << 20}) {
+		t.Fatalf("read %+v", got)
 	}
 }

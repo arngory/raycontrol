@@ -181,3 +181,65 @@ func TestAddNaiveUDPHostile(t *testing.T) {
 		}
 	}
 }
+
+// rayctl metrics shows each enabled naive service's TCP tunnels' memory
+// (memory-v1 §5) as its stats socket gives it, udp=on or not: counts by
+// service only. One that does not give it, or does not answer, shows none.
+func TestMetricsNaiveMemory(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"})); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"nv", "old", "away"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "naive", Name: name})); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	srv.Paths.Run = t.TempDir()
+	for name, mem := range map[string]func() naive.MemoryStats{
+		"nv": func() naive.MemoryStats {
+			return naive.MemoryStats{Budget: 64 << 20, Charge: 3 << 20, Pressure: true, Refused: 5, Evicted: 2}
+		},
+		"old": nil,
+	} {
+		if err := os.Mkdir(filepath.Join(srv.Paths.Run, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		users := filepath.Join(t.TempDir(), "users.json")
+		if err := os.WriteFile(users, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		u := &naive.Users{Path: users}
+		u.SetMemory(mem)
+		if err := u.ServeStats(t.Context(), srv.Paths.StatsSocket(name), slog.New(slog.DiscardHandler)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv.NaiveMemory = func(ctx context.Context, service string) (*naive.MemoryStats, error) {
+		r, err := traffic.ReadLine(ctx, srv.Paths.StatsSocket(service))
+		return r.Memory, err
+	}
+	m, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := m.Msg.Text
+	for _, want := range []string{
+		`raycontrol_naive_tunnels_budget_bytes{service="nv"} 67108864`,
+		`raycontrol_naive_tunnels_charge_bytes{service="nv"} 3145728`,
+		`raycontrol_naive_tunnels_pressure{service="nv"} 1`,
+		`raycontrol_naive_tunnels_refused_total{service="nv"} 5`,
+		`raycontrol_naive_tunnels_evicted_total{service="nv"} 2`,
+	} {
+		if !strings.Contains(text, want+"\n") {
+			t.Errorf("metrics lack %s", want)
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "raycontrol_naive_tunnels_") && !strings.Contains(line, `{service="nv"}`) {
+			t.Errorf("memory metrics of another service: %s", line)
+		}
+	}
+}

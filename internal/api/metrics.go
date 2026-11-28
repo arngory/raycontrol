@@ -356,10 +356,12 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 	var front dnsstats.Front
 	var frontErr error
 	// naive's datagram requests (spec/naive-udp-v1.md §7): the udp of its
-	// stats socket's line, on a service with udp=on.
+	// stats socket's line, on a service with udp=on; and its TCP tunnels'
+	// memory (spec/memory-v1.md §5), on every one.
 	type naiveRead struct {
 		name string
 		udp  *naive.UDPStats
+		mem  *naive.MemoryStats
 	}
 	var naives []*naiveRead
 	var wg sync.WaitGroup
@@ -377,9 +379,10 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 				r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
 			}()
 		case "naive":
-			// Only with udp=on: the line of one without has no udp, and
-			// its users' bytes are the traffic loop's to read.
-			if s.NaiveUDP == nil || !provision.NaiveUDP(svc) {
+			// The datagrams only with udp=on: the line of one without has
+			// no udp, and its users' bytes are the traffic loop's to read.
+			udp := s.NaiveUDP != nil && provision.NaiveUDP(svc)
+			if !udp && s.NaiveMemory == nil {
 				continue
 			}
 			r := &naiveRead{name: svc.Name}
@@ -387,8 +390,15 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if udp, err := s.NaiveUDP(ctx, r.name); err == nil {
-					r.udp = udp
+				if udp {
+					if u, err := s.NaiveUDP(ctx, r.name); err == nil {
+						r.udp = u
+					}
+				}
+				if s.NaiveMemory != nil {
+					if m, err := s.NaiveMemory(ctx, r.name); err == nil {
+						r.mem = m
+					}
 				}
 			}()
 		}
@@ -407,6 +417,9 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 	for _, r := range naives {
 		if r.udp != nil {
 			addNaiveUDP(&m, r.name, *r.udp)
+		}
+		if r.mem != nil {
+			addNaiveMemory(&m, r.name, *r.mem)
 		}
 	}
 	// The front's: queries by zone (load: anyone can send a zone's name;
@@ -524,6 +537,20 @@ func addNaiveUDP(m *Metrics, service string, u naive.UDPStats) {
 	for _, r := range reasons {
 		add("raycontrol_naive_udp_dropped_total", "naive's datagrams dropped, either way, by reason (spec/naive-udp-v1.md §7).", max(byReason[r], 0), "reason", r)
 	}
+}
+
+// addNaiveMemory adds a naive service's TCP tunnels' memory
+// (spec/memory-v1.md §5), labelled by service: counts only.
+func addNaiveMemory(m *Metrics, service string, st naive.MemoryStats) {
+	pressure := 0.0
+	if st.Pressure {
+		pressure = 1
+	}
+	m.Add("raycontrol_naive_tunnels_budget_bytes", "naive's budget for its TCP tunnels' memory.", float64(st.Budget), "service", service)
+	m.Add("raycontrol_naive_tunnels_charge_bytes", "naive's TCP tunnels' memory as charged now.", float64(st.Charge), "service", service)
+	m.Add("raycontrol_naive_tunnels_pressure", "1 while naive resets TCP tunnels that hold memory and do not move.", pressure, "service", service)
+	m.Add("raycontrol_naive_tunnels_refused_total", "naive's CONNECTs refused 429 at the memory budget since naive started.", float64(st.Refused), "service", service)
+	m.Add("raycontrol_naive_tunnels_evicted_total", "naive's TCP tunnels reset under memory pressure since naive started.", float64(st.Evicted), "service", service)
 }
 
 // addSaturating is a + b for counts: below zero is zero, past

@@ -68,10 +68,12 @@ const (
 	refusedDest    = "dest"    // new UDP destinations
 	refusedLive    = "live"    // UDP pairs
 	refusedLookup  = "lookup"  // name lookups
+	refusedMemory  = "memory"  // TCP at the memory budget, the user at its share (pressure.go)
 )
 
-// errEvicted ends a quiet UoT stream for a new one of the same user.
-var errEvicted = errors.New("naive: a quiet stream gave way to a new one")
+// errEvicted ends a quiet UoT stream for a new one of the same user, and a
+// TCP tunnel reset under memory pressure (pressure.go).
+var errEvicted = errors.New("naive: a stream gave way")
 
 // limits are a process's per-user limits. The zero value is ready, limits
 // on.

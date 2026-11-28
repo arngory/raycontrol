@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -189,4 +191,112 @@ func TestConnContextSockets(t *testing.T) {
 		t.Error("a pipe has a socket")
 	}
 	datagramStream(ctx)()
+}
+
+// Each HTTP/2 connection's socket gets TCP_USER_TIMEOUT (clientTimeout):
+// a client that leaves the server's data unacknowledged that long is gone.
+func TestClientUserTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	accepted, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer accepted.Close()
+	srv := (&Server{Log: slog.New(slog.DiscardHandler)}).HTTPServer()
+	srv.ConnContext(context.Background(), tls.Server(accepted, &tls.Config{MinVersion: tls.VersionTLS13}))
+	rc, _ := accepted.(*net.TCPConn).SyscallConn()
+	var v int
+	var serr error
+	if err := rc.Control(func(fd uintptr) { v, serr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT) }); err != nil || serr != nil {
+		t.Fatal(err, serr)
+	}
+	if v != int(clientTimeout/time.Millisecond) {
+		t.Fatalf("TCP_USER_TIMEOUT %d ms, want %v", v, clientTimeout)
+	}
+}
+
+// What TCP_USER_TIMEOUT does to a peer that is there but reads nothing
+// (spec/memory-v1.md §5): it acknowledges the window probes, its window
+// stays shut, and the connection is cut once the timeout passes. Pinned on
+// the kernel the change was made on (6.18); one that keeps it is said.
+func TestUserTimeoutZeroWindow(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	peer := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.(*net.TCPConn).SetReadBuffer(4096)
+			peer <- c
+		}
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	defer func() { (<-peer).Close() }()
+	rc, _ := c.(*net.TCPConn).SyscallConn()
+	var serr error
+	if err := rc.Control(func(fd uintptr) { serr = setUserTimeout(fd, time.Second) }); err != nil || serr != nil {
+		t.Fatal(err, serr)
+	}
+	start := time.Now()
+	_ = c.SetWriteDeadline(start.Add(15 * time.Second))
+	buf := make([]byte, 64<<10)
+	for {
+		if _, err = c.Write(buf); err != nil {
+			break
+		}
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Skipf("this kernel keeps a connection whose peer holds its window shut but acknowledges: %v", err)
+	}
+	if !errors.Is(err, syscall.ETIMEDOUT) {
+		t.Fatalf("after %v: %v", time.Since(start), err)
+	}
+	t.Logf("cut after %v", time.Since(start).Round(100*time.Millisecond))
+}
+
+// SO_MEMINFO: what the kernel holds for a socket, its unread bytes among
+// it.
+func TestSockMemory(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	before := connMemory(s)
+	if _, err := c.Write(make([]byte, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the unread bytes not counted", func() bool { return connMemory(s) >= before+64<<10 })
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	if connMemory(a) != 0 {
+		t.Fatal("a pipe holds kernel memory")
+	}
 }

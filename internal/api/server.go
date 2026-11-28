@@ -101,6 +101,11 @@ type Server struct {
 	// nil without udp=on, or an error when it cannot be read. nil: the
 	// metrics show none.
 	NaiveUDP func(ctx context.Context, service string) (*naive.UDPStats, error)
+	// NaiveMemory reads a naive service's TCP tunnels' memory from its
+	// stats socket (traffic.ReadLine, spec/memory-v1.md §5) for the
+	// metrics: nil from a naive too old to give it. nil: the metrics show
+	// none.
+	NaiveMemory func(ctx context.Context, service string) (*naive.MemoryStats, error)
 	// SubRequests counts the subscription's answers (sub.Server.Requests);
 	// nil: the metrics show none.
 	SubRequests *sub.Requests

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -256,6 +257,23 @@ func TestSameBoot(t *testing.T) {
 	} {
 		if got := SameBoot(c.a, c.b); got != c.same {
 			t.Errorf("SameBoot(%s, %s) = %v", c.a, c.b, got)
+		}
+	}
+}
+
+// rayd naive's TCP tunnels' memory (from v0.37.0): read beside the bytes,
+// counts below zero as zero; a bad one is none and costs the bytes
+// nothing.
+func TestParseLineMemory(t *testing.T) {
+	r, err := parseLine([]byte(`{"v":1,"boot":"b","users":{"u5":{"up":1,"down":2}},` +
+		`"memory":{"budget":64,"charge":-3,"pressure":true,"refused":5,"evicted":2}}`))
+	if err != nil || r.Memory == nil || *r.Memory != (naive.MemoryStats{Budget: 64, Pressure: true, Refused: 5, Evicted: 2}) || len(r.Users) != 1 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	for _, m := range []string{``, `,"memory":null`, `,"memory":"lots"`, `,"memory":{"budget":"x"}`} {
+		r, err := parseLine([]byte(`{"v":1,"boot":"b","users":{"u5":{"up":1,"down":2}}` + m + `}`))
+		if err != nil || r.Memory != nil || len(r.Users) != 1 {
+			t.Errorf("%q: %+v %v", m, r, err)
 		}
 	}
 }

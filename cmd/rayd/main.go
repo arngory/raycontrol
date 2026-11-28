@@ -104,6 +104,7 @@ func main() {
 	case "serve", "site", "naive", "relay":
 		// The Go memory limit from the unit's cgroup (docs/spec/memory-v1.md §3).
 		l := memlimit.Start(logx.New(os.Stderr, slog.LevelInfo))
+		procMemory = l
 		// Xray's connection buffers by a data unit's memory, as rayctl
 		// apply sizes the units from the host's (§4, §6).
 		render.SetXrayBuffer(deploy.MemoryOf(l.MemTotal).Unit)
@@ -334,6 +335,11 @@ func cmdServe(args []string) error {
 	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
 		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
 		return r.UDP, err
+	}
+	// naive's TCP tunnels' memory (memory-v1 §5), on the same line.
+	srv.NaiveMemory = func(ctx context.Context, service string) (*naive.MemoryStats, error) {
+		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
+		return r.Memory, err
 	}
 	// rayctl stats (spec/stats-v1.md): the metrics without names and the
 	// host, a sample a minute, two hours of them in memory.
@@ -1608,12 +1614,21 @@ func cmdNaive(args []string) error {
 	// The users file is watched: a user taken off it (disabled, expired,
 	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
 	go nu.Watch(ctx)
-	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
-	// The refusals of the connection limits go out with the bytes, and
-	// with -udp the datagram requests' counts: set before the stats socket
-	// answers.
+	// The TCP tunnels' budget is of the unit's memory as the process read
+	// it at its start (memory-v1 §5); the scanner resets those that hold
+	// memory and do not move, under pressure only.
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log, H3Conn: naiveH3Conn}
+	if procMemory != (memlimit.Limits{}) {
+		ns.Memory = &procMemory // else naive reads it
+	}
+	go ns.WatchMemory(ctx)
+	// The refusals of the connection limits go out with the bytes, the
+	// tunnels' memory, and with -udp the datagram requests' counts: set
+	// before the stats socket answers.
 	nu.SetRefused(ns.Refused)
+	nu.SetMemory(ns.MemoryStats)
 	quicOpts := naiveUDP(ns, *udp)
+	quicOpts.window = ns.AllowH3Window
 	if *statsSocket != "" {
 		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
 			return err

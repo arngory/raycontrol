@@ -66,6 +66,10 @@ func MemoryOf(total int64) Memory {
 // throttles and reclaims before it kills.
 func high(n int64) int64 { return n / 8 * 7 }
 
+// MemoryHigh is the MemoryHigh a unit of MemoryMax n gets (high): for the
+// budgets inside the processes, as their cgroups will have it.
+func MemoryHigh(n int64) int64 { return high(n) }
+
 // Share is n as systemd's share of the host's memory: a percentage with
 // two decimals (systemd takes no more), rounded down, 0.01% at least.
 // systemd recomputes it when the host's size changes; rayctl apply

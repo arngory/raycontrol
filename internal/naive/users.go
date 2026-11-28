@@ -52,6 +52,7 @@ type Users struct {
 	// udp the datagram requests' counts (SetUDP).
 	refused func() map[string]map[string]int64
 	udp     func() UDPStats
+	memory  func() MemoryStats
 }
 
 // SetRefused sets where the stats socket's answer gets the refusals of the
@@ -69,6 +70,14 @@ func (u *Users) SetUDP(f func() UDPStats) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.udp = f
+}
+
+// SetMemory sets where the stats socket's answer gets the TCP tunnels'
+// charge and what it did (Server.MemoryStats); nil: none.
+func (u *Users) SetMemory(f func() MemoryStats) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.memory = f
 }
 
 // staleAfter is how long the counters of a name gone from the file stay
@@ -415,6 +424,11 @@ type TrafficSnapshot struct {
 	// (spec/naive-udp-v1.md §7), on a service with udp=on: rayd reads them
 	// for rayctl metrics (traffic.Reading.UDP, from v0.31.0).
 	UDP *UDPStats `json:"udp,omitempty"`
+	// Memory are the TCP tunnels' budget, charge and pressure, and the
+	// CONNECTs refused and tunnels reset by them since the start
+	// (spec/memory-v1.md §5): counts only. rayd reads them for rayctl
+	// metrics from v0.37.0.
+	Memory *MemoryStats `json:"memory,omitempty"`
 }
 
 // UserTraffic are a name's bytes at the destinations' side.
@@ -444,6 +458,10 @@ func (u *Users) Snapshot() TrafficSnapshot {
 	if u.udp != nil {
 		st := u.udp()
 		s.UDP = &st
+	}
+	if u.memory != nil {
+		m := u.memory()
+		s.Memory = &m
 	}
 	return s
 }

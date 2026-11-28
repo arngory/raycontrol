@@ -111,14 +111,26 @@ type Options struct {
 	// streams a peer holds bound it (spec/naive-udp-v1.md §16.3). Each
 	// connection then has a sender of its own (datagrams.go).
 	Datagrams bool
+	// Window, when not nil, is asked before a connection's receive window
+	// grows by delta (quic-go's AllowConnectionWindowIncrease): false keeps
+	// the window as it is. done ends with the connection. It is called
+	// from quic-go's flow control and must not call into the connection or
+	// its streams. The windows a connection starts with, and what its
+	// transport parameters say, are the same with it and without: naive's
+	// budget (spec/memory-v1.md §5); nil for DoH3.
+	Window func(conn *quic.Conn, done <-chan struct{}, delta uint64) bool
 }
 
 // Config is the QUIC side of a server: packets of PacketSize to each
 // client, chosen once per connection, and no search of the path's MTU.
 // What the server accepts is the same for both: quic-go's 1452.
-func Config(o Options) *quic.Config {
+func Config(o Options) *quic.Config { return config(o, nil) }
+
+// config is Config with allow as quic-go's AllowConnectionWindowIncrease.
+func config(o Options, allow func(*quic.Conn, uint64) bool) *quic.Config {
 	v4 := &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
-		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true, EnableDatagrams: o.Datagrams}
+		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true, EnableDatagrams: o.Datagrams,
+		AllowConnectionWindowIncrease: allow}
 	v6 := *v4
 	v6.InitialPacketSize = MaxPacketSizeIPv6
 	c := *v4
@@ -238,13 +250,25 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 			}
 			return ctx, nil
 		}}
-	ln, err := tr.ListenEarly(tlsConf, Config(o))
+	// The connections Window may be asked of, and their ends: quic-go's
+	// hook has the connection and nothing else, and may call nothing of it.
+	var ends sync.Map // *quic.Conn → <-chan struct{}
+	var allow func(*quic.Conn, uint64) bool
+	if o.Window != nil {
+		allow = func(c *quic.Conn, delta uint64) bool {
+			v, _ := ends.Load(c)
+			done, ok := v.(<-chan struct{})
+			return ok && o.Window(c, done, delta)
+		}
+	}
+	ln, err := tr.ListenEarly(tlsConf, config(o, allow))
 	if err != nil {
 		return err
 	}
 	// A connection without a request goes after the same time as a silent
-	// one.
-	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes, EnableDatagrams: o.Datagrams}
+	// one. Its requests know the connection (Conn).
+	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes, EnableDatagrams: o.Datagrams,
+		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context { return context.WithValue(ctx, connKey{}, c) }}
 	wait := o.HeaderWait
 	if wait == 0 {
 		wait = HeaderTimeout
@@ -259,7 +283,13 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 			err = aerr
 			break
 		}
-		conns.Go(func() { serveConn(ctx, srv, qc, wait, o.PendingStreams) })
+		conns.Go(func() {
+			if allow != nil {
+				ends.Store(qc, qc.Context().Done())
+				defer ends.Delete(qc)
+			}
+			serveConn(ctx, srv, qc, wait, o.PendingStreams)
+		})
 	}
 	_ = ln.Close()
 	conns.Wait() // each is closed with ctx, with a word to its client
@@ -272,6 +302,15 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 		return err
 	}
 	return nil
+}
+
+type connKey struct{}
+
+// Conn is the QUIC connection of a request the server serves; nil for
+// any other context.
+func Conn(ctx context.Context) *quic.Conn {
+	c, _ := ctx.Value(connKey{}).(*quic.Conn)
+	return c
 }
 
 // aheadConn drops a client's short-header packet for a connection ID the
