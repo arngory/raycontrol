@@ -77,6 +77,9 @@ const (
 	evictRound = 64
 	// memEvery is the scanner's tick.
 	memEvery = time.Second
+	// memWaitLooks bounds the looks a round of the heap's waits for a GC
+	// while its mark is still exceeded.
+	memWaitLooks = 5
 	// memWarnEvery bounds the warnings of refusals and evictions.
 	memWarnEvery = time.Minute
 )
@@ -151,7 +154,8 @@ type tunnels struct {
 	gcSet     bool
 	gcAt      uint64
 	heapSeen  [2]int64 // the live heap and the goal, stacks with each, less sockets
-	heapFreed int64
+	heapFreed int64    // of the heap: F and window parts, not the sockets' memory
+	waitTicks int      // looks since, the mark exceeded and no round
 	warnAt    time.Time
 	warned    [2]int64 // refused, evicted at the last warning
 	warnLog   *slog.Logger
@@ -413,6 +417,10 @@ func (t *tunnels) grow(conn any, done <-chan struct{}, delta uint64) bool {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			delete(t.grants, conn)
+			// Its streams' window parts are of the first window now.
+			for g := range t.byConn[conn] {
+				t.recountLocked(g)
+			}
 		}()
 	}
 	t.grants[conn] = min(had+int64(min(delta, h3ConnWindowMax)), h3ConnWindowMax)
@@ -501,7 +509,7 @@ func (t *tunnels) scan(collect func(charge int64) bool) memSnapshot {
 		}
 		cands = append(cands, c)
 	}
-	t.cands = cands
+	t.cands = cands // cleared after the round (tick)
 	snap.charge = t.charge
 	if !want {
 		return snap
@@ -575,38 +583,50 @@ func (t *tunnels) tick() {
 	// (by then the reset tunnels have gone, a write that stood within its
 	// second). Meanwhile the heap is taken as that round saw it, less what
 	// it reckoned to free, and only the sockets' growth since brings a round.
-	// The charge's rounds do not wait.
+	// The sockets' memory a round freed is in the fresh sock already: only
+	// its heap part is taken off. At most memWaitLooks looks go by so while
+	// the mark is still exceeded; then a round comes, GC or none. The
+	// charge's rounds do not wait.
 	heap := max(need[triggerLive], need[triggerGoal], 0)
 	waiting := t.heapWait
 	if waiting {
 		if !t.gcSet {
 			t.gcAt, t.gcSet = sig.cycles, true
 		}
-		if sig.cycles >= t.gcAt+2 {
+		var l, g int64
+		if sig.limit > 0 {
+			l = t.heapSeen[0] + sig.sock - t.heapFreed - sig.limit*liveOn/100
+		}
+		if sig.throttle > 0 {
+			g = t.heapSeen[1] + sig.sock - t.heapFreed - sig.throttle*goalOn/100
+		}
+		switch reckoned := min(heap, max(l, g, 0)); {
+		case sig.cycles >= t.gcAt+2:
 			waiting, t.heapWait = false, false
-		} else {
-			var l, g int64
-			if sig.limit > 0 {
-				l = t.heapSeen[0] + sig.sock - t.heapFreed - sig.limit*liveOn/100
-			}
-			if sig.throttle > 0 {
-				g = t.heapSeen[1] + sig.sock - t.heapFreed - sig.throttle*goalOn/100
-			}
-			heap = min(heap, max(l, g, 0))
+		case reckoned == 0 && heap > 0 && t.waitTicks+1 >= memWaitLooks:
+			waiting, t.heapWait = false, false // waited long enough: the fresh heap
+		case reckoned == 0 && heap > 0:
+			t.waitTicks++
+			heap = 0
+		default:
+			heap = reckoned
 		}
 	}
 	if want := max(heap, need[triggerCharge]); want > 0 && len(snap.cands) > 0 {
-		list, freed := pick(snap, want)
+		list, freedHeap, _ := pick(snap, want, heap)
 		t.evict(list)
 		if heap > 0 {
 			if waiting {
-				t.heapFreed += freed
+				t.heapFreed += freedHeap
 			} else {
-				t.heapSeen, t.heapFreed = [2]int64{heapLive, heapGoal}, freed
+				t.heapSeen, t.heapFreed = [2]int64{heapLive, heapGoal}, freedHeap
 			}
-			t.heapWait, t.gcSet = true, false
+			t.heapWait, t.gcSet, t.waitTicks = true, false, 0
 		}
 	}
+	// What the round weighed is not kept alive past it: ended tunnels,
+	// closed connections.
+	clear(t.cands[:cap(t.cands)])
 	t.warn(snap.charge, budget)
 }
 
@@ -619,11 +639,16 @@ func (t *tunnels) tick() {
 // its share has a stream blocked that long. Once none of theirs is pending
 // or blocked, their HTTP/3 streams whose upload's read has waited
 // evictGrace or longer (classReading), the longest first: the one exception
-// to an idle stream never reset. Then the users under their share, while
-// want is not met, only their streams blocked evictGrace or longer. A
-// download's are ranked by their socket's memory, after the streams that
-// hold their window part.
-func pick(snap memSnapshot, want int64) ([]*tunnelMem, int64) {
+// to an idle stream never reset. Then the users within their share, while
+// want is not met, the largest charge first: of each its streams blocked
+// evictGrace or longer, and while heapWant (the heap's and the sockets'
+// part of want, real memory, not the charge's) is not met its HTTP/3
+// streams reading that long: their charge is what they are expected to
+// hold, up to h3Packets times more may wait out of order. A download's are
+// ranked by their socket's memory, after the streams that hold their
+// window part. It says what they are reckoned to free of the heap (F and
+// window parts) and of the sockets (a download's).
+func pick(snap memSnapshot, want, heapWant int64) (list []*tunnelMem, freedHeap, freedSock int64) {
 	eff := maps.Clone(snap.users)
 	for i := range snap.cands {
 		c := &snap.cands[i]
@@ -671,9 +696,9 @@ func pick(snap memSnapshot, want int64) ([]*tunnelMem, int64) {
 	var freed int64
 	taken := map[*memCand]bool{}
 	full := func() bool { return len(out) >= evictRound || freed >= want }
-	take := func(list []*memCand) {
+	take := func(list []*memCand, until ...int64) {
 		for _, c := range list {
-			if full() {
+			if full() || len(until) > 0 && freed >= until[0] {
 				return
 			}
 			if taken[c] {
@@ -690,7 +715,10 @@ func pick(snap memSnapshot, want int64) ([]*tunnelMem, int64) {
 			if c.uploading {
 				g.uploading--
 			}
-			freed += tunnelCost + c.held + before - g.charge()
+			heap := tunnelCost + before - g.charge()
+			freed += heap + c.held
+			freedHeap += heap
+			freedSock += c.held
 		}
 	}
 	for _, name := range over {
@@ -712,8 +740,9 @@ func pick(snap memSnapshot, want int64) ([]*tunnelMem, int64) {
 	take(reading)
 	for _, name := range under {
 		take(byUser[name][classStuck])
+		take(byUser[name][classReading], heapWant)
 	}
-	return out, freed
+	return out, freedHeap, freedSock
 }
 
 // evict resets the streams: their charge goes at once, and their tunnels

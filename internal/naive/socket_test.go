@@ -393,7 +393,13 @@ func TestEvictRankSockMemory(t *testing.T) {
 		tm.down.Store(mono() - int64(time.Hour))
 		names[tm] = name
 	}
-	p, freed := pick(tn.snapshot(), 1<<40)
+	p, heap, sock := pick(tn.snapshot(), 1<<40, 1<<40)
+	freed := heap + sock
+	// The sockets' part apart: a round of the heap's takes only the heap's
+	// off, the fresh sock has the rest.
+	if heap != 2*tunnelCost || sock < 2*(32<<10) {
+		t.Fatalf("freed %d of the heap, %d of the sockets", heap, sock)
+	}
 	if len(p) != 2 || names[p[0]] != "large" || names[p[1]] != "small" || freed < 2*tunnelCost+2*(32<<10) {
 		t.Fatalf("picked %d, first %q, %d freed", len(p), names[p[0]], freed)
 	}
