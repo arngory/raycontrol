@@ -72,12 +72,12 @@ func TestMetricsNaiveUDP(t *testing.T) {
 	serve("stale", func() naive.UDPStats { return naive.UDPStats{Requests: 98} })
 	var mu sync.Mutex
 	var asked []string
-	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
+	srv.NaiveStats = func(ctx context.Context, service string) (*naive.UDPStats, *naive.MemoryStats, error) {
 		mu.Lock()
 		asked = append(asked, service)
 		mu.Unlock()
 		r, err := traffic.ReadLine(ctx, srv.Paths.StatsSocket(service))
-		return r.UDP, err
+		return r.UDP, r.Memory, err
 	}
 	m, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {
@@ -112,10 +112,11 @@ func TestMetricsNaiveUDP(t *testing.T) {
 			t.Errorf("UDP metrics of another service: %s", line)
 		}
 	}
-	// Only the enabled services with udp=on are read: not a disabled one,
-	// not one without udp=on, whatever its process gives.
+	// Each enabled service is read once (its tunnels' memory), a disabled
+	// one not; the datagrams shown are those of the ones with udp=on only,
+	// whatever a process without it gives.
 	slices.Sort(asked)
-	if !slices.Equal(asked, []string{"away", "nv"}) {
+	if !slices.Equal(asked, []string{"away", "nv", "plain", "stale"}) {
 		t.Errorf("sockets read: %v", asked)
 	}
 	for _, line := range strings.Split(text, "\n") {
@@ -129,7 +130,7 @@ func TestMetricsNaiveUDP(t *testing.T) {
 		}
 	}
 	// Without the reader (a rayd that has none wired): no UDP metrics.
-	srv.NaiveUDP = nil
+	srv.NaiveStats = nil
 	if m, err = c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{})); err != nil || strings.Contains(m.Msg.Text, "raycontrol_naive_udp_") {
 		t.Fatalf("without the reader: %v", err)
 	}
@@ -217,9 +218,9 @@ func TestMetricsNaiveMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	srv.NaiveMemory = func(ctx context.Context, service string) (*naive.MemoryStats, error) {
+	srv.NaiveStats = func(ctx context.Context, service string) (*naive.UDPStats, *naive.MemoryStats, error) {
 		r, err := traffic.ReadLine(ctx, srv.Paths.StatsSocket(service))
-		return r.Memory, err
+		return r.UDP, r.Memory, err
 	}
 	m, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {

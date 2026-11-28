@@ -14,6 +14,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/qlog"
+	"github.com/quic-go/quic-go/qlogwriter"
 )
 
 // Window is asked before a connection's receive window grows, with the
@@ -67,7 +69,9 @@ func TestWindow(t *testing.T) {
 			served <- Serve(ctx, udp, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, h, o)
 		}()
 		addr := udp.LocalAddr().String()
+		seen := &maxData{}
 		tr := &http3.Transport{
+			QUICConfig: &quic.Config{Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return seen }},
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
 				CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
 			Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
@@ -78,7 +82,9 @@ func TestWindow(t *testing.T) {
 		var qc *quic.Conn
 		var n int
 		var done []<-chan struct{}
+		sent := int64(0)
 		for range 5 {
+			sent += body
 			req, _ := http.NewRequest(http.MethodPost, "https://h3.test/", bytes.NewReader(make([]byte, body)))
 			resp, err := tr.RoundTrip(req)
 			if err != nil || resp.StatusCode != http.StatusOK {
@@ -122,6 +128,20 @@ func TestWindow(t *testing.T) {
 		if grant && grown == 0 {
 			t.Fatal("granted, the window did not grow")
 		}
+		// Denied, the window the server gives stays its first: what it lets
+		// the client send is what it read and that window at most (and a
+		// few kilobytes of the requests' headers).
+		most := seen.most() - sent
+		t.Logf("grant %v: the server's MAX_DATA %d KiB past what was sent", grant, most>>10)
+		if seen.most() == 0 {
+			t.Fatal("no MAX_DATA seen")
+		}
+		if !grant && most > 768<<10+16<<10 {
+			t.Fatalf("denied, the server let %d KiB past what it read", most>>10)
+		}
+		if grant && most <= 768<<10+16<<10 {
+			t.Fatalf("granted, the server let only %d KiB past what it read", most>>10)
+		}
 	}
 	if Conn(context.Background()) != nil {
 		t.Fatal("a connection of no request")
@@ -135,4 +155,37 @@ func (d *delayed) WriteTo(b []byte, addr net.Addr) (int, error) {
 	p := append([]byte(nil), b...)
 	time.AfterFunc(10*time.Millisecond, func() { _, _ = d.PacketConn.WriteTo(p, addr) })
 	return len(b), nil
+}
+
+// maxData keeps the largest MAX_DATA a client received.
+type maxData struct {
+	mu sync.Mutex
+	n  int64
+}
+
+func (m *maxData) AddProducer() qlogwriter.Recorder { return m }
+func (m *maxData) SupportsSchemas(string) bool      { return true }
+func (m *maxData) Close() error                     { return nil }
+
+func (m *maxData) RecordEvent(e qlogwriter.Event) {
+	p, ok := e.(qlog.PacketReceived)
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range p.Frames {
+		switch f := f.Frame.(type) {
+		case *qlog.MaxDataFrame:
+			m.n = max(m.n, int64(f.MaximumData))
+		case qlog.MaxDataFrame:
+			m.n = max(m.n, int64(f.MaximumData))
+		}
+	}
+}
+
+func (m *maxData) most() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.n
 }

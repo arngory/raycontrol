@@ -176,6 +176,21 @@ func TestTunnelChargeH3(t *testing.T) {
 		defer tn.mu.Unlock()
 		return len(tn.grants) == 0
 	})
+	// Running and idle, their uploads not ended: the connection's window
+	// (out of order data, unseen); ended, F alone.
+	tn.run(a, nil)
+	tn.run(b, nil)
+	if got, want := tn.stats().Charge, 2*tunnelCost+int64(h3ConnWindow); got != want {
+		t.Fatalf("idle: %d, want %d", got, want)
+	}
+	tn.uploaded(a)
+	if got, want := tn.stats().Charge, 2*tunnelCost+int64(h3ConnWindow); got != want {
+		t.Fatalf("one upload ended: %d, want %d", got, want)
+	}
+	tn.uploaded(b)
+	if got := tn.stats().Charge; got != 2*tunnelCost {
+		t.Fatalf("both ended: %d", got)
+	}
 	tn.leave(a)
 	tn.leave(b)
 }
@@ -249,16 +264,19 @@ func TestPressureMarks(t *testing.T) {
 	if !tn.pressure.Load() || c.count() != 1 || !c.evicted("a") {
 		t.Fatalf("over the mark: pressure %v, %v", tn.pressure.Load(), c.errs)
 	}
-	// No GC since: none.
+	// No GC since: none; one cycle from the look after the round is not
+	// enough either (it may have marked before the tunnels went).
+	tn.tick()
+	f.set(func(s *memSignals) { s.cycles++ })
 	tn.tick()
 	if c.count() != 1 {
-		t.Fatalf("before a GC: %v", c.errs)
+		t.Fatalf("before two GCs: %v", c.errs)
 	}
-	// A GC, and the heap still over: one more.
+	// Two, and the heap still over: one more.
 	f.set(func(s *memSignals) { s.cycles++ })
 	tn.tick()
 	if c.count() != 2 || !c.evicted("b") {
-		t.Fatalf("after a GC: %v", c.errs)
+		t.Fatalf("after two GCs: %v", c.errs)
 	}
 	// Between the marks: pressure stays, nothing reset.
 	f.set(func(s *memSignals) { s.live, s.cycles = g*80/100, s.cycles+1 })
@@ -277,7 +295,7 @@ func TestPressureMarks(t *testing.T) {
 	if tn.pressure.Load() {
 		t.Fatal("the goal under its mark")
 	}
-	f.set(func(s *memSignals) { s.throttle = g * 11 / 10 * 100 / 95 })
+	f.set(func(s *memSignals) { s.throttle, s.cycles = g*11/10*100/95, s.cycles+2 })
 	tn.tick() // 95 %, over by a little
 	if !tn.pressure.Load() || c.count() != 3 {
 		t.Fatalf("the goal over its mark: pressure %v, %v", tn.pressure.Load(), c.errs)
@@ -351,7 +369,8 @@ func TestEvictOrder(t *testing.T) {
 	add("u3", "u3-slow", stuck(time.Millisecond))
 	add("u3", "u3-idle", idle)
 	var got []string
-	for _, tm := range pick(tn.snapshot(), 1<<40) {
+	p, _ := pick(tn.snapshot(), 1<<40)
+	for _, tm := range p {
 		got = append(got, names[tm])
 	}
 	want := []string{"u2-stuck", "u2-pending", "u2-pending", "u2-pending", "u2-pending", "u2-pending", "u2-pending", "u2-slow",
@@ -366,7 +385,7 @@ func TestEvictOrder(t *testing.T) {
 	}
 	// What is wanted bounds the round: u2's stuck one frees F and its
 	// window part.
-	if p := pick(tn.snapshot(), tunnelCost+site.StreamWindow); len(p) != 1 || names[p[0]] != "u2-stuck" {
+	if p, freed := pick(tn.snapshot(), tunnelCost+site.StreamWindow); len(p) != 1 || names[p[0]] != "u2-stuck" || freed != tunnelCost+site.StreamWindow {
 		t.Fatalf("one wanted: %d picked", len(p))
 	}
 	// At most evictRound a round.
@@ -374,7 +393,7 @@ func TestEvictOrder(t *testing.T) {
 	for range evictRound + 10 {
 		blocked(tn2, tn2.admit("u9", nil, false, func(error) {}), true, time.Hour)
 	}
-	if p := pick(tn2.snapshot(), 1<<40); len(p) != evictRound {
+	if p, _ := pick(tn2.snapshot(), 1<<40); len(p) != evictRound {
 		t.Fatalf("%d in a round", len(p))
 	}
 }
@@ -384,6 +403,20 @@ func TestEvictOrder(t *testing.T) {
 // tunnels' budget b and readings the test's; connect opens a tunnel.
 func memServer(t *testing.T, b int64, o ...clientOpts) (*Server, *fakeSignals, func(password, target string) (*http.Response, *io.PipeWriter)) {
 	t.Helper()
+	h, f, try := memServerTry(t, b, o...)
+	return h, f, func(password, target string) (*http.Response, *io.PipeWriter) {
+		t.Helper()
+		resp, pw, err := try(password, target)
+		if err != nil {
+			t.Fatalf("CONNECT %s: %v", target, err)
+		}
+		return resp, pw
+	}
+}
+
+// memServerTry is memServer whose connect gives the request's error.
+func memServerTry(t *testing.T, b int64, o ...clientOpts) (*Server, *fakeSignals, func(password, target string) (*http.Response, *io.PipeWriter, error)) {
+	t.Helper()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12", "other": "u6"})
 	answer, _ := site.Responder(site.Answer404, "")
@@ -391,8 +424,7 @@ func memServer(t *testing.T, b int64, o ...clientOpts) (*Server, *fakeSignals, f
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: memDial(t), Log: slog.New(slog.DiscardHandler)}
 	h.mem.budget, h.mem.read = b, f.read
 	url, tr := serveOver(t, h, o...)
-	return h, f, func(password, target string) (*http.Response, *io.PipeWriter) {
-		t.Helper()
+	return h, f, func(password, target string) (*http.Response, *io.PipeWriter, error) {
 		pr, pw := io.Pipe()
 		t.Cleanup(func() { pw.Close() })
 		req, _ := http.NewRequest(http.MethodConnect, url, pr)
@@ -400,11 +432,10 @@ func memServer(t *testing.T, b int64, o ...clientOpts) (*Server, *fakeSignals, f
 		req.Header.Set("Padding", paddingHeader())
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
 		resp, err := roundTrip(t, tr, req)
-		if err != nil {
-			t.Fatalf("CONNECT %s: %v", target, err)
+		if err == nil {
+			t.Cleanup(func() { resp.Body.Close() })
 		}
-		t.Cleanup(func() { resp.Body.Close() })
-		return resp, pw
+		return resp, pw, err
 	}
 }
 
@@ -522,7 +553,11 @@ func TestTunnelChargePendingOver(t *testing.T) {
 		want := 6*tunnelCost + min(6*w, limit)
 		eventually(t, "pending tunnels not charged", func() bool { return h.MemoryStats().Charge == want })
 		close(release)
-		eventually(t, "running tunnels charged more than F", func() bool { return h.MemoryStats().Charge == 6*tunnelCost })
+		idle := int64(6 * tunnelCost)
+		if protoOf(t) == "h3" {
+			idle += h3ConnWindow // the connection's, while uploads are open
+		}
+		eventually(t, "running tunnels charged more than F", func() bool { return h.MemoryStats().Charge == idle })
 		for _, r := range resps {
 			r.Body.Close()
 		}
@@ -581,8 +616,9 @@ func TestTunnelBudgetOver(t *testing.T) {
 	})
 }
 
-// Under pressure, an idle tunnel is charged F and never reset, however
-// long it has been idle.
+// Under pressure, an idle tunnel is charged F (and over HTTP/3 the
+// connection's window) and never reset, however long it has been idle:
+// over HTTP/2 whatever the user's share, over HTTP/3 within it.
 func TestIdleTunnelsStay(t *testing.T) {
 	g := evictGrace
 	evictGrace = 50 * time.Millisecond
@@ -594,11 +630,17 @@ func TestIdleTunnelsStay(t *testing.T) {
 			resp, pw := connect("pw", "192.0.2.1:4")
 			tunnels = append(tunnels, &paddedStream{r: resp.Body, w: pw})
 		}
-		eventually(t, "not F each", func() bool { return h.MemoryStats().Charge == 3*tunnelCost })
-		// The charge past 1.5 B too.
-		h.mem.mu.Lock()
-		h.mem.budget = 64 << 10
-		h.mem.mu.Unlock()
+		want := int64(3 * tunnelCost)
+		if protoOf(t) == "h3" {
+			want += h3ConnWindow // the connection's, while uploads are open
+		} else {
+			// HTTP/2's idle tunnels stay over the user's share too, the
+			// charge past 1.5 B.
+			h.mem.mu.Lock()
+			h.mem.budget = 64 << 10
+			h.mem.mu.Unlock()
+		}
+		eventually(t, "not F each", func() bool { return h.MemoryStats().Charge == want })
 		time.Sleep(3 * evictGrace)
 		f.set(func(s *memSignals) { s.limit, s.live, s.cycles = 100<<20, 100<<20, 1 })
 		for range 3 {
@@ -675,7 +717,7 @@ func TestPressureEvicts(t *testing.T) {
 		if st := h.MemoryStats(); st.Evicted != 1 {
 			t.Fatalf("before a GC: %+v", st)
 		}
-		f.set(func(s *memSignals) { s.cycles++ })
+		f.set(func(s *memSignals) { s.cycles += 2 })
 		h.tunnels().tick()
 		if st := h.MemoryStats(); st.Evicted != 2 {
 			t.Fatalf("after a GC: %+v", st)
@@ -697,6 +739,160 @@ func TestPressureEvicts(t *testing.T) {
 		}
 		if got := h.MemoryStats().Evicted; got != 2 {
 			t.Fatalf("%d reset", got)
+		}
+	})
+}
+
+// An HTTP/3 stream whose upload's read waits (what came out of order may
+// sit in QUIC's packets) is reset under pressure only from a user over its
+// share, after its pending and blocked streams and every other user's over
+// its share, and before a user under its share; an idle HTTP/2 stream
+// never, an idle HTTP/3 one of a user within its share never.
+func TestEvictReading(t *testing.T) {
+	const b = 64 << 20 // shares of 8 MiB
+	tn, _ := testTunnels(b)
+	names := map[*tunnelMem]string{}
+	add := func(user, name string, conn any, h3 bool, state func(*tunnelMem)) {
+		tm := tn.admit(user, conn, h3, func(error) {})
+		names[tm] = name
+		state(tm)
+	}
+	reading := func(d time.Duration) func(*tunnelMem) {
+		return func(tm *tunnelMem) { tn.run(tm, nil); tm.rd.Store(mono() - int64(d)) }
+	}
+	c1, c2 := new(int), new(int)
+	// u1, over HTTP/3: 8.25 MiB of the connection's window and 4 F.
+	add("u1", "u1-stuck", c1, true, func(tm *tunnelMem) { blocked(tn, tm, true, time.Minute) })
+	add("u1", "u1-read-short", c1, true, reading(time.Minute))
+	add("u1", "u1-read-long", c1, true, reading(time.Hour))
+	add("u1", "u1-read-young", c1, true, reading(time.Millisecond))
+	// u4, over HTTP/2: 4 stuck uploads and an idle one reading.
+	for range 4 {
+		add("u4", "u4-stuck", nil, false, func(tm *tunnelMem) { blocked(tn, tm, true, time.Minute) })
+	}
+	add("u4", "u4-idle", nil, false, reading(time.Hour))
+	// u2 within its share, over HTTP/3; u3 within it, over HTTP/2.
+	add("u2", "u2-read", c2, true, reading(time.Hour))
+	add("u2", "u2-stuck-down", c2, true, func(tm *tunnelMem) { blocked(tn, tm, false, time.Minute) })
+	add("u3", "u3-idle", nil, false, reading(time.Hour))
+	p, _ := pick(tn.snapshot(), 1<<40)
+	var got []string
+	for _, tm := range p {
+		got = append(got, names[tm])
+	}
+	want := []string{"u1-stuck", "u4-stuck", "u4-stuck", "u4-stuck", "u4-stuck", "u1-read-long", "u1-read-short", "u2-stuck-down"}
+	if len(got) != len(want) {
+		t.Fatalf("picked %v\nwant %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("picked %v\nwant %v", got, want)
+		}
+	}
+}
+
+// The wait for a GC after a round of the heap's, both ways: two cycles
+// from the look after the round, unless the sockets alone grew past what
+// the round reckoned to free.
+func TestPressureGCWait(t *testing.T) {
+	tn, f := testTunnels(1 << 30)
+	var c cancelled
+	for i := range 10 {
+		blocked(tn, tn.admit("u5", nil, false, c.fn(string(rune('a'+i)))), true, time.Duration(10-i)*time.Hour)
+	}
+	const g = 1000 << 20
+	f.set(func(s *memSignals) { s.limit, s.live, s.cycles = g, g*85/100+1, 1 })
+	tn.tick()
+	if c.count() != 1 {
+		t.Fatalf("the round: %v", c.errs)
+	}
+	tn.tick() // the look after it: no GC, the sockets as they were
+	if c.count() != 1 {
+		t.Fatalf("before a GC: %v", c.errs)
+	}
+	// The sockets grew by more than the round freed: a round now.
+	f.set(func(s *memSignals) { s.sock = 4 << 20 })
+	tn.tick()
+	if c.count() != 2 {
+		t.Fatalf("the sockets past it: %v", c.errs)
+	}
+	// What both rounds freed covers it: none, until two cycles from the
+	// look after.
+	tn.tick()
+	f.set(func(s *memSignals) { s.cycles++ })
+	tn.tick()
+	if c.count() != 2 {
+		t.Fatalf("one cycle: %v", c.errs)
+	}
+	f.set(func(s *memSignals) { s.cycles++ })
+	tn.tick()
+	if c.count() != 4 { // fresh: 4 MiB over, two of 2.1 MiB
+		t.Fatalf("two cycles: %v", c.errs)
+	}
+}
+
+// A pending stream reset under pressure, while it waits for its dial or
+// for its attempt's token, is a reset at the client, never an answer; one
+// whose wait ends as its user is revoked too. Neither counts as a refusal
+// of the rate.
+func TestEvictPending(t *testing.T) {
+	overProtos(t, func(t *testing.T) {
+		memRelease.Lock()
+		memRelease.ch = make(chan struct{})
+		release := memRelease.ch
+		memRelease.Unlock()
+		defer close(release)
+		h, _, try := memServerTry(t, 1<<30)
+		evictAll := func() {
+			h.mem.mu.Lock()
+			var list []*tunnelMem
+			for tm := range h.mem.all {
+				list = append(list, tm)
+			}
+			h.mem.mu.Unlock()
+			h.mem.evict(list)
+		}
+		// During the dial: after the 200 (no niko-ack).
+		resp, _, err := try("pw", "192.0.2.1:5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "not registered", func() bool { return h.MemoryStats().Charge > 0 })
+		evictAll()
+		if err := ended(resp.Body, 5*time.Second); !serverReset(t, err) {
+			t.Fatalf("during the dial: %v, want a reset", err)
+		}
+		// During the token's wait: before any answer.
+		waiting := make(chan struct{}, 1)
+		h.lim.mu.Lock()
+		h.lim.userLocked("u5", time.Now()).attempts = bucket{0.5, time.Now()}
+		h.lim.sleep = func(ctx context.Context, _ time.Duration) error {
+			waiting <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		h.lim.mu.Unlock()
+		for _, end := range []string{"evicted", "revoked"} {
+			got := make(chan error, 1)
+			go func() {
+				_, _, err := try("pw", "192.0.2.1:4")
+				got <- err
+			}()
+			<-waiting
+			if end == "evicted" {
+				evictAll()
+			} else {
+				writeUsersNamed(t, h.Users.Path, map[string]string{"other": "u6", "more": "u7-ab"})
+				h.Users.mu.Lock()
+				h.Users.reload()
+				h.Users.mu.Unlock()
+			}
+			if err := <-got; !serverReset(t, err) {
+				t.Fatalf("%s while it waits for its token: %v, want a reset", end, err)
+			}
+		}
+		if st, rate := h.MemoryStats(), h.Refused()["u5"][refusedRate]; st.Evicted != 2 || rate != 0 {
+			t.Fatalf("%+v, %d refusals of the rate", st, rate)
 		}
 	})
 }

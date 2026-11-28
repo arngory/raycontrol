@@ -75,13 +75,24 @@ func TestTunnelCost(t *testing.T) {
 		}
 		// A first tunnel: the connection, its buffers, the server's pools.
 		child := costClient(t, protoOf(t), addr, 1)
-		eventually(t, "the first tunnel", func() bool { return h.MemoryStats().Charge == tunnelCost })
+		running := func() int {
+			h.mem.mu.Lock()
+			defer h.mem.mu.Unlock()
+			n := 0
+			for tm := range h.mem.all {
+				if !tm.pend {
+					n++
+				}
+			}
+			return n
+		}
+		eventually(t, "the first tunnel", func() bool { return running() == 1 })
 		before := heap()
 		child.more(n)
 		end := time.Now().Add(20 * time.Second)
-		for h.MemoryStats().Charge != (n+1)*tunnelCost {
+		for running() != n+1 {
 			if time.Now().After(end) {
-				t.Fatalf("%d of %d tunnels", h.MemoryStats().Charge/tunnelCost, n+1)
+				t.Fatalf("%d of %d tunnels", running(), n+1)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}

@@ -35,6 +35,22 @@ type connSocket struct {
 	mu        sync.Mutex
 	datagrams int // UoT and ICMP streams open on the connection
 	own       int // the socket's bound before the first of them
+	timeouts  int // TCP_USER_TIMEOUT set (once, userTimeout)
+}
+
+// userTimeout sets the socket's TCP_USER_TIMEOUT to clientTimeout, once.
+func (c *connSocket) userTimeout() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.timeouts > 0 {
+		return nil
+	}
+	c.timeouts++
+	var err error
+	if cerr := c.rc.Control(func(fd uintptr) { err = setUserTimeout(fd, clientTimeout) }); cerr != nil {
+		return cerr
+	}
+	return err
 }
 
 type connSocketKey struct{}

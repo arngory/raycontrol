@@ -379,26 +379,23 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 				r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
 			}()
 		case "naive":
-			// The datagrams only with udp=on: the line of one without has
-			// no udp, and its users' bytes are the traffic loop's to read.
-			udp := s.NaiveUDP != nil && provision.NaiveUDP(svc)
-			if !udp && s.NaiveMemory == nil {
+			// One read of its line: the datagrams only with udp=on (the
+			// line of one without has none), the tunnels' memory from any;
+			// its users' bytes are the traffic loop's to read.
+			if s.NaiveStats == nil {
 				continue
 			}
 			r := &naiveRead{name: svc.Name}
 			naives = append(naives, r)
+			udp := provision.NaiveUDP(svc)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if udp {
-					if u, err := s.NaiveUDP(ctx, r.name); err == nil {
+				if u, m, err := s.NaiveStats(ctx, r.name); err == nil {
+					if udp {
 						r.udp = u
 					}
-				}
-				if s.NaiveMemory != nil {
-					if m, err := s.NaiveMemory(ctx, r.name); err == nil {
-						r.mem = m
-					}
+					r.mem = m
 				}
 			}()
 		}

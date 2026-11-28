@@ -96,16 +96,12 @@ type Server struct {
 	// ConnLimit keeps the refusals, the table and the guard
 	// (spec/conn-limit-v1.md §7); nil shows nothing of them.
 	ConnLimit *connlimit.Monitor
-	// NaiveUDP reads a naive service's datagram requests from its stats
-	// socket (traffic.ReadLine, spec/naive-udp-v1.md §7) for the metrics:
-	// nil without udp=on, or an error when it cannot be read. nil: the
-	// metrics show none.
-	NaiveUDP func(ctx context.Context, service string) (*naive.UDPStats, error)
-	// NaiveMemory reads a naive service's TCP tunnels' memory from its
-	// stats socket (traffic.ReadLine, spec/memory-v1.md §5) for the
-	// metrics: nil from a naive too old to give it. nil: the metrics show
-	// none.
-	NaiveMemory func(ctx context.Context, service string) (*naive.MemoryStats, error)
+	// NaiveStats reads a naive service's stats socket once
+	// (traffic.ReadLine) for the metrics: its datagram requests
+	// (spec/naive-udp-v1.md §7; nil without udp=on) and its TCP tunnels'
+	// memory (spec/memory-v1.md §5; nil from a naive too old to give it),
+	// or an error when it cannot be read. nil: the metrics show neither.
+	NaiveStats func(ctx context.Context, service string) (*naive.UDPStats, *naive.MemoryStats, error)
 	// SubRequests counts the subscription's answers (sub.Server.Requests);
 	// nil: the metrics show none.
 	SubRequests *sub.Requests

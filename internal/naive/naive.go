@@ -128,6 +128,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
 	ctx := a.ctx
 	target := r.Host
+	// An authenticated stream: its HTTP/2 connection is a client's, cut
+	// once it leaves the server's data unacknowledged for clientTimeout.
+	if c, _ := r.Context().Value(connSocketKey{}).(*connSocket); c != nil {
+		if err := c.userTimeout(); err != nil {
+			s.Log.Debug("naive: TCP_USER_TIMEOUT not set", "err", err)
+		}
+	}
 	// The padding the client asked for (padding.go): what every answer
 	// from here on says, a refusal's as a 200's.
 	reply, padded := paddingType(r.Header)
@@ -187,7 +194,10 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 				paid = true
 			}
 		}
-		if kind != "" && errors.Is(context.Cause(ctx), errEvicted) {
+		// The wait ended with the stream (the client gone, the user
+		// revoked, the stream reset under pressure): a reset, as for any
+		// stream ended before its 200; no refusal counted for it.
+		if kind != "" && ctx.Err() != nil {
 			panic(http.ErrAbortHandler)
 		}
 		if kind != "" {
@@ -293,9 +303,16 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	// destination's side, as each write goes (traffic-limit-v1 §2.3).
 	// Each write's start is noted (pressure.go): a write that does not
 	// return is a tunnel that holds memory and does not move.
+	// Over HTTP/3 the upload's reads are noted too: what came out of order
+	// waits unseen in QUIC's packets while the read does.
 	s.mem.run(mem, out)
+	var up io.Reader = in
+	if r.ProtoMajor == 3 {
+		up = stampReader{in, &mem.rd}
+	}
 	go func() {
-		_, _ = io.Copy(stampWriter{countWriter{out, a.traffic.up()}, &mem.up}, in)
+		_, _ = io.Copy(stampWriter{countWriter{out, a.traffic.up()}, &mem.up}, up)
+		s.mem.uploaded(mem)
 		if cw, ok := out.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}

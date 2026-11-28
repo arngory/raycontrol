@@ -253,15 +253,10 @@ func (l Limits) Base() int64 {
 	return base
 }
 
-// Throttle is where the kernel starts to throttle the cgroup: High, or
-// without one 15/16 of Max (where Base puts the rest of a cgroup without
-// High); 0 without either.
-func (l Limits) Throttle() int64 {
-	if h := l.below(l.High); h > 0 {
-		return h
-	}
-	return l.below(l.Max) / 16 * 15
-}
+// Throttle is where the kernel starts to hold the cgroup back: the less of
+// High and 15/16 of Max (Base): a High above Max is never reached, the
+// kernel reclaims and kills at Max first. 0 without either.
+func (l Limits) Throttle() int64 { return l.Base() }
 
 // SetGoLimit gives the runtime GoLimit(num, den) through set (the
 // runtime's debug.SetMemoryLimit) unless the environment (getenv) has

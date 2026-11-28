@@ -264,8 +264,8 @@ func TestSetGoLimit(t *testing.T) {
 	}
 }
 
-// Base and Throttle: the less of High and 15/16 of Max, and High or else
-// 15/16 of Max; none without a limit below the host.
+// Base and Throttle: the less of High and 15/16 of Max, a High above Max
+// never reached; none without a limit below the host.
 func TestBaseThrottle(t *testing.T) {
 	const host = 16 << 30
 	for _, c := range []struct {
@@ -276,7 +276,7 @@ func TestBaseThrottle(t *testing.T) {
 		{Limits{Max: 32 << 30, MemTotal: host}, 0, 0},
 		{Limits{Max: 1 << 30, MemTotal: host}, 960 * mib, 960 * mib},
 		{Limits{Max: 1 << 30, High: 896 * mib, MemTotal: host}, 896 * mib, 896 * mib},
-		{Limits{Max: 512 * mib, High: 1 << 30, MemTotal: host}, 480 * mib, 1 << 30},
+		{Limits{Max: 512 * mib, High: 1 << 30, MemTotal: host}, 480 * mib, 480 * mib}, // a High above Max: Max's
 		{Limits{High: 512 * mib, MemTotal: host}, 512 * mib, 512 * mib},
 	} {
 		if got := c.l.Base(); got != c.base {

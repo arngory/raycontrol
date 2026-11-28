@@ -34,6 +34,9 @@ import (
 //     window; HTTP/3's h3Packets times the stream's window within the
 //     connection's (as far as AllowH3Window let it grow), all of a
 //     connection's within h3Packets times the connection's window;
+//   - over HTTP/3, a connection with an upload of the user's not ended is
+//     the user's for its window at least (groupState.charge): QUIC keeps
+//     what comes out of order until the gap is filled, unseen;
 //   - a stream blocked on its download to the client holds no more of the
 //     process: what it holds is the destination socket's kernel memory
 //     (SO_MEMINFO), read only when a round of evictions ranks it.
@@ -49,7 +52,9 @@ import (
 //     throttle, or the charge at 1.5 B) the scanner resets the streams that
 //     hold memory and do not move, those of the users over their share
 //     first (evict). A stream that is neither pending nor in a write is
-//     never reset: an idle SSH session or websocket stays.
+//     never reset, an idle SSH session or websocket stays, but for an
+//     HTTP/3 one of a user over its share whose upload's read has waited
+//     long, the last resort (classReading).
 const (
 	// tunnelCost (F) is what an idle TCP tunnel holds of the heap and the
 	// stacks, measured by TestTunnelCost on loopback (Go 1.27, amd64, 200
@@ -127,23 +132,30 @@ type tunnels struct {
 	budget int64
 	all    map[*tunnelMem]bool
 	users  map[string]*memUser
-	groups map[groupKey]*memGroup // of streams on a known connection
-	grants map[any]int64          // HTTP/3 connections' window growth granted
-	charge int64                  // all users'
+	groups map[groupKey]*memGroup     // of streams on a known connection
+	byConn map[any]map[*memGroup]bool // HTTP/3's groups by connection
+	grants map[any]int64              // HTTP/3 connections' window growth granted
+	charge int64                      // all users'
 
 	pressure         atomic.Bool
 	refused, evicted atomic.Int64
 	read             func() memSignals
 
-	// The scanner's own (one goroutine): the triggers' state, whether the
-	// next round of the heap's waits for a GC cycle past gcAt, and the
-	// warning's.
-	on      [3]bool
-	waitGC  bool
-	gcAt    uint64
-	warnAt  time.Time
-	warned  [2]int64 // refused, evicted at the last warning
-	warnLog *slog.Logger
+	// The scanner's own (one goroutine): the triggers' state; after a
+	// round of the heap's, the wait for a GC (heapWait: gcAt once the
+	// round's tunnels have gone, at the next look) and what that round saw
+	// of the heap and reckoned to free; the warning's; the candidates'
+	// slice, used again.
+	on        [3]bool
+	heapWait  bool
+	gcSet     bool
+	gcAt      uint64
+	heapSeen  [2]int64 // the live heap and the goal, stacks with each, less sockets
+	heapFreed int64
+	warnAt    time.Time
+	warned    [2]int64 // refused, evicted at the last warning
+	warnLog   *slog.Logger
+	cands     []memCand
 }
 
 type memUser struct {
@@ -159,28 +171,31 @@ type groupKey struct {
 }
 
 type memGroup struct {
-	key     groupKey
-	user    *memUser
-	h3      bool
-	streams int
-	counted int   // streams with their window part
-	w       int64 // their window parts, within the cap
+	key       groupKey
+	user      *memUser
+	h3        bool
+	streams   int
+	counted   int   // streams with their window part
+	uploading int   // streams whose upload has not ended
+	w         int64 // the group's window part as charged
 }
 
 // tunnelMem is one TCP tunnel in the registry. up and down are when its
-// write to the destination and to the client began (mono), 0 out of one:
-// the tunnel's own goroutines set them, two stores a write, no lock.
+// write to the destination and to the client began (mono), 0 out of one;
+// rd when its read of the client's upload began, over HTTP/3 only: the
+// tunnel's own goroutines set them, two stores a write or a read, no lock.
 type tunnelMem struct {
-	up, down atomic.Int64
+	up, down, rd atomic.Int64
 
 	// Under tunnels.mu.
-	g      *memGroup
-	cancel context.CancelCauseFunc
-	at     int64 // admitted (mono)
-	out    net.Conn
-	pend   bool // admitted, its copy not started
-	count  bool // its window part counted
-	gone   bool // evicted, or ended: charges nothing
+	g         *memGroup
+	cancel    context.CancelCauseFunc
+	at        int64 // admitted (mono)
+	out       net.Conn
+	pend      bool // admitted, its copy not started
+	count     bool // its window part counted
+	uploading bool // its upload has not ended
+	gone      bool // evicted, or ended: charges nothing
 }
 
 // tunnels is the server's registry, its budget from s.Memory (the
@@ -209,22 +224,47 @@ func (t *tunnels) shareLocked() int64 {
 	return t.budget / int64(max(memShares, len(t.users)))
 }
 
-// windowLocked is a stream's window part in g, and the cap of all of g's.
-func (t *tunnels) windowLocked(g *memGroup) (w, limit int64) {
-	if !g.h3 {
-		return site.StreamWindow, site.ConnWindow
-	}
-	win := int64(h3ConnWindow)
-	if g.key.conn != nil {
-		win = min(win+t.grants[g.key.conn], h3ConnWindowMax)
-	}
-	return h3Packets * min(h3StreamWindowMax, win), h3Packets * win
+// groupState is what a group's window part is reckoned from.
+type groupState struct {
+	h3                 bool
+	counted, uploading int64
+	w, limit, win      int64
 }
 
-// recountLocked sets g's window part anew from its counted streams.
+// charge is the group's window part: its counted streams' within the cap;
+// over HTTP/3 the connection's window at least while an upload of the
+// group's has not ended. QUIC keeps what comes out of order in its packets
+// until the gap is filled, unseen by the handler, which waits in its read
+// meanwhile: a connection holds up to its window so.
+func (g groupState) charge() int64 {
+	n := min(g.limit, g.counted*g.w)
+	if g.h3 && g.uploading > 0 {
+		n = max(n, g.win)
+	}
+	return n
+}
+
+// stateLocked is g's as it is now: HTTP/2's stream window, all of a
+// connection's within its window; HTTP/3's h3Packets times the stream's
+// window within the connection's (as far as AllowH3Window let it grow), all
+// of a connection's within h3Packets times its window.
+func (t *tunnels) stateLocked(g *memGroup) groupState {
+	gs := groupState{h3: g.h3, counted: int64(g.counted), uploading: int64(g.uploading)}
+	if !g.h3 {
+		gs.w, gs.limit = site.StreamWindow, site.ConnWindow
+		return gs
+	}
+	gs.win = h3ConnWindow
+	if g.key.conn != nil {
+		gs.win = min(gs.win+t.grants[g.key.conn], h3ConnWindowMax)
+	}
+	gs.w, gs.limit = h3Packets*min(h3StreamWindowMax, gs.win), h3Packets*gs.win
+	return gs
+}
+
+// recountLocked sets g's window part anew.
 func (t *tunnels) recountLocked(g *memGroup) {
-	w, limit := t.windowLocked(g)
-	n := min(limit, int64(g.counted)*w)
+	n := t.stateLocked(g).charge()
 	t.addLocked(g.user, n-g.w)
 	g.w = n
 }
@@ -249,6 +289,7 @@ func (t *tunnels) admit(user string, conn any, h3 bool, cancel context.CancelCau
 	}
 	if t.users == nil {
 		t.all, t.users, t.groups = map[*tunnelMem]bool{}, map[string]*memUser{}, map[groupKey]*memGroup{}
+		t.byConn = map[any]map[*memGroup]bool{}
 	}
 	if u == nil {
 		u = &memUser{}
@@ -262,13 +303,20 @@ func (t *tunnels) admit(user string, conn any, h3 bool, cancel context.CancelCau
 		g = &memGroup{key: groupKey{user, conn}, user: u, h3: h3}
 		if conn != nil {
 			t.groups[g.key] = g
+			if h3 {
+				if t.byConn[conn] == nil {
+					t.byConn[conn] = map[*memGroup]bool{}
+				}
+				t.byConn[conn][g] = true
+			}
 		}
 	}
-	tm := &tunnelMem{g: g, cancel: cancel, at: mono(), pend: true, count: true}
+	tm := &tunnelMem{g: g, cancel: cancel, at: mono(), pend: true, count: true, uploading: true}
 	t.all[tm] = true
 	u.streams++
 	g.streams++
 	g.counted++
+	g.uploading++
 	t.addLocked(u, tunnelCost)
 	t.recountLocked(g)
 	return tm
@@ -281,6 +329,22 @@ func (t *tunnels) run(tm *tunnelMem, out net.Conn) {
 	defer t.mu.Unlock()
 	tm.out, tm.pend = out, false
 	t.setCountLocked(tm, tm.up.Load() != 0)
+}
+
+// uploaded notes that the tunnel's upload ended.
+func (t *tunnels) uploaded(tm *tunnelMem) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.endUploadLocked(tm)
+}
+
+func (t *tunnels) endUploadLocked(tm *tunnelMem) {
+	if tm.gone || !tm.uploading {
+		return
+	}
+	tm.uploading = false
+	tm.g.uploading--
+	t.recountLocked(tm.g)
 }
 
 func (t *tunnels) setCountLocked(tm *tunnelMem, count bool) {
@@ -305,6 +369,12 @@ func (t *tunnels) leave(tm *tunnelMem) {
 	g := tm.g
 	if g.streams--; g.streams == 0 && t.groups[g.key] == g {
 		delete(t.groups, g.key)
+		if gs := t.byConn[g.key.conn]; gs != nil {
+			delete(gs, g)
+			if len(gs) == 0 {
+				delete(t.byConn, g.key.conn)
+			}
+		}
 	}
 	if g.user.streams--; g.user.streams == 0 {
 		delete(t.users, g.key.user)
@@ -318,14 +388,15 @@ func (t *tunnels) dropLocked(tm *tunnelMem) {
 		return
 	}
 	t.setCountLocked(tm, false)
+	t.endUploadLocked(tm)
 	tm.gone = true
 	t.addLocked(tm.g.user, -tunnelCost)
 }
 
 // grow is HTTP/3's window hook (Server.AllowH3Window): a connection's
 // window grows while the charge is under the budget and there is no
-// pressure, and what it grew by sizes its streams' window parts. Its
-// record goes when done does.
+// pressure, and what it grew by sizes its streams' window parts at once.
+// Its record goes when done does.
 func (t *tunnels) grow(conn any, done <-chan struct{}, delta uint64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -345,6 +416,9 @@ func (t *tunnels) grow(conn any, done <-chan struct{}, delta uint64) bool {
 		}()
 	}
 	t.grants[conn] = min(had+int64(min(delta, h3ConnWindowMax)), h3ConnWindowMax)
+	for g := range t.byConn[conn] {
+		t.recountLocked(g)
+	}
 	return true
 }
 
@@ -355,27 +429,30 @@ func (t *tunnels) stats() MemoryStats {
 	return MemoryStats{Budget: t.budget, Charge: charge, Pressure: t.pressure.Load(), Refused: t.refused.Load(), Evicted: t.evicted.Load()}
 }
 
-// memCand is a stream a round may reset, as the snapshot saw it.
+// memCand is a stream a round may reset, as the scan saw it.
 type memCand struct {
-	tm    *tunnelMem
-	user  string
-	class int   // classStuck, classPending, classSlow
-	since int64 // blocked or admitted since (mono)
-	down  bool  // only its download blocked: its socket's memory ranks it
-	held  int64 // that memory (SO_MEMINFO)
-	out   net.Conn
-	g     *memGroup
+	tm        *tunnelMem
+	user      string
+	class     int   // classStuck, classPending, classSlow, classReading
+	since     int64 // blocked, admitted or reading since (mono)
+	down      bool  // only its download blocked: its socket's memory ranks it
+	counted   bool  // its window part counted
+	uploading bool
+	held      int64 // its socket's memory (SO_MEMINFO), when down
+	out       net.Conn
+	g         *memGroup
 }
 
 const (
 	classStuck   = iota // blocked evictGrace or longer
 	classPending        // admitted, its copy not started
 	classSlow           // blocked less than evictGrace
+	// classReading: over HTTP/3, neither pending nor blocked, its read of
+	// the upload waiting evictGrace or longer: what came out of order may
+	// be in QUIC's packets (groupState.charge).
+	classReading
+	classes
 )
-
-// groupState is a group's counted streams, window part and cap, as a
-// round reckons what each reset frees.
-type groupState struct{ counted, w, limit int64 }
 
 // memSnapshot is what a round weighs: the streams it may reset, the
 // users' charges, the charge, the share and the groups.
@@ -387,49 +464,66 @@ type memSnapshot struct {
 	groups map[*memGroup]*groupState
 }
 
-// snapshot counts every stream's window part anew from its state, and
-// gives what a round weighs. Only atomics are read under the lock.
-func (t *tunnels) snapshot() memSnapshot {
+// scan counts every stream's window part anew from its state, in one pass
+// under the lock reading atomics only, and gives what a round weighs when
+// collect says one may come (the streams only then).
+func (t *tunnels) scan(collect func(charge int64) bool) memSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	now := mono()
-	grace := int64(evictGrace)
-	snap := memSnapshot{users: make(map[string]int64, len(t.users)), groups: map[*memGroup]*groupState{}}
-	ups := make(map[*tunnelMem][2]int64, len(t.all))
+	snap := memSnapshot{charge: t.charge, share: t.shareLocked()}
+	want := collect(t.charge)
+	now, grace := mono(), int64(evictGrace)
+	cands := t.cands[:0]
 	for tm := range t.all {
-		if !tm.gone {
-			up, down := tm.up.Load(), tm.down.Load()
-			ups[tm] = [2]int64{up, down}
-			t.setCountLocked(tm, tm.pend || up != 0)
+		if tm.gone {
+			continue
 		}
-	}
-	for tm, ud := range ups {
-		up, down := ud[0], ud[1]
-		if snap.groups[tm.g] == nil {
-			t.recountLocked(tm.g) // the HTTP/3 window as it grew
-			w, limit := t.windowLocked(tm.g)
-			snap.groups[tm.g] = &groupState{counted: int64(tm.g.counted), w: w, limit: limit}
+		up := tm.up.Load()
+		t.setCountLocked(tm, tm.pend || up != 0)
+		if !want {
+			continue
 		}
-		c := memCand{tm: tm, user: tm.g.key.user, g: tm.g, out: tm.out}
+		c := memCand{tm: tm, user: tm.g.key.user, g: tm.g, out: tm.out, counted: tm.count, uploading: tm.uploading}
+		down, rd := tm.down.Load(), tm.rd.Load()
 		switch since := min(nonzero(up), nonzero(down)); {
 		case tm.pend:
 			c.class, c.since = classPending, tm.at
-		case since == math.MaxInt64:
-			continue // neither pending nor in a write: never reset
-		default:
+		case since != math.MaxInt64:
 			c.since, c.down = since, up == 0
 			c.class = classSlow
 			if now-since >= grace {
 				c.class = classStuck
 			}
+		case tm.g.h3 && tm.uploading && rd != 0 && now-rd >= grace:
+			c.class, c.since = classReading, rd
+		default:
+			continue // idle: never reset
 		}
-		snap.cands = append(snap.cands, c)
+		cands = append(cands, c)
 	}
+	t.cands = cands
+	snap.charge = t.charge
+	if !want {
+		return snap
+	}
+	snap.cands = cands
+	snap.users = make(map[string]int64, len(t.users))
 	for name, u := range t.users {
 		snap.users[name] = u.charge
 	}
-	snap.charge, snap.share = t.charge, t.shareLocked()
+	snap.groups = map[*memGroup]*groupState{}
+	for i := range cands {
+		if g := cands[i].g; snap.groups[g] == nil {
+			gs := t.stateLocked(g)
+			snap.groups[g] = &gs
+		}
+	}
 	return snap
+}
+
+// snapshot is scan with the streams, whatever the readings.
+func (t *tunnels) snapshot() memSnapshot {
+	return t.scan(func(int64) bool { return true })
 }
 
 func nonzero(v int64) int64 {
@@ -442,19 +536,23 @@ func nonzero(v int64) int64 {
 // tick is one look of the scanner: the triggers, and under pressure a
 // round of resets.
 func (t *tunnels) tick() {
-	snap := t.snapshot()
 	sig := t.read()
 	budget := t.budget
 	// The three triggers (spec/memory-v1.md §5): the live heap, stacks and
 	// sockets against the Go limit; the heap's goal (within the limit),
 	// stacks and sockets against the cgroup's throttle; the charge against
 	// the budget. Each on at its first mark, off at its second.
-	live := sig.live + sig.stacks + sig.sock
-	goal := sig.goal
+	heapLive := sig.live + sig.stacks
+	heapGoal := sig.goal
 	if sig.limit > 0 {
-		goal = min(goal, sig.limit)
+		heapGoal = min(heapGoal, sig.limit)
 	}
-	goal += sig.stacks + sig.sock
+	heapGoal += sig.stacks
+	over := func(v, of, on int64) bool { return of > 0 && v*100 >= of*on }
+	snap := t.scan(func(charge int64) bool {
+		return t.pressure.Load() || over(heapLive+sig.sock, sig.limit, liveOn) || over(heapGoal+sig.sock, sig.throttle, goalOn) ||
+			over(charge, budget, chargeOn)
+	})
 	var need [3]int64
 	mark := func(i int, v, of, on, off int64) {
 		switch {
@@ -468,37 +566,64 @@ func (t *tunnels) tick() {
 		}
 		need[i] = v - of*on/100
 	}
-	mark(triggerLive, live, sig.limit, liveOn, liveOff)
-	mark(triggerGoal, goal, sig.throttle, goalOn, goalOff)
+	mark(triggerLive, heapLive+sig.sock, sig.limit, liveOn, liveOff)
+	mark(triggerGoal, heapGoal+sig.sock, sig.throttle, goalOn, goalOff)
 	mark(triggerCharge, snap.charge, budget, chargeOn, chargeOff)
 	t.pressure.Store(t.on[triggerLive] || t.on[triggerGoal] || t.on[triggerCharge])
-	// A round of the heap's waits for a GC past the last one: what it
-	// freed shows only after one. The charge's does not wait.
+	// After a round of the heap's what it freed shows only once a GC has
+	// run past the tunnels' end: two cycles from the look after the round
+	// (by then the reset tunnels have gone, a write that stood within its
+	// second). Meanwhile the heap is taken as that round saw it, less what
+	// it reckoned to free, and only the sockets' growth since brings a round.
+	// The charge's rounds do not wait.
 	heap := max(need[triggerLive], need[triggerGoal], 0)
-	if t.waitGC && sig.cycles == t.gcAt {
-		heap = 0
-	} else {
-		t.waitGC = false
-	}
-	if want := max(heap, need[triggerCharge]); want > 0 {
-		if heap > 0 {
-			t.waitGC, t.gcAt = true, sig.cycles
+	waiting := t.heapWait
+	if waiting {
+		if !t.gcSet {
+			t.gcAt, t.gcSet = sig.cycles, true
 		}
-		t.evict(pick(snap, want))
+		if sig.cycles >= t.gcAt+2 {
+			waiting, t.heapWait = false, false
+		} else {
+			var l, g int64
+			if sig.limit > 0 {
+				l = t.heapSeen[0] + sig.sock - t.heapFreed - sig.limit*liveOn/100
+			}
+			if sig.throttle > 0 {
+				g = t.heapSeen[1] + sig.sock - t.heapFreed - sig.throttle*goalOn/100
+			}
+			heap = min(heap, max(l, g, 0))
+		}
+	}
+	if want := max(heap, need[triggerCharge]); want > 0 && len(snap.cands) > 0 {
+		list, freed := pick(snap, want)
+		t.evict(list)
+		if heap > 0 {
+			if waiting {
+				t.heapFreed += freed
+			} else {
+				t.heapSeen, t.heapFreed = [2]int64{heapLive, heapGoal}, freed
+			}
+			t.heapWait, t.gcSet = true, false
+		}
 	}
 	t.warn(snap.charge, budget)
 }
 
 // pick chooses the streams to reset, at most evictRound, until what they
 // are reckoned to free (their charge, and a download's socket memory)
-// reaches want. The users over their fair share come first, the largest
-// first; of a user, the streams blocked evictGrace or longer, the longest
-// first; then its pending ones and those blocked less, only from a user at
-// twice its share or more, or once no user over its share has a stream
-// blocked that long. Then the users under their share, while want is not
-// met, only their streams blocked that long. A download's are ranked by
-// their socket's memory, after the streams that hold their window part.
-func pick(snap memSnapshot, want int64) []*tunnelMem {
+// reaches want, and says what that is. The users over their fair share
+// come first, the largest first; of a user, the streams blocked evictGrace
+// or longer, the longest first; then its pending ones and those blocked
+// less, only from a user at twice its share or more, or once no user over
+// its share has a stream blocked that long. Once none of theirs is pending
+// or blocked, their HTTP/3 streams whose upload's read has waited
+// evictGrace or longer (classReading), the longest first: the one exception
+// to an idle stream never reset. Then the users under their share, while
+// want is not met, only their streams blocked evictGrace or longer. A
+// download's are ranked by their socket's memory, after the streams that
+// hold their window part.
+func pick(snap memSnapshot, want int64) ([]*tunnelMem, int64) {
 	eff := maps.Clone(snap.users)
 	for i := range snap.cands {
 		c := &snap.cands[i]
@@ -507,11 +632,11 @@ func pick(snap memSnapshot, want int64) []*tunnelMem {
 			eff[c.user] += c.held
 		}
 	}
-	byUser := map[string]*[3][]*memCand{}
+	byUser := map[string]*[classes][]*memCand{}
 	for i := range snap.cands {
 		c := &snap.cands[i]
 		if byUser[c.user] == nil {
-			byUser[c.user] = new([3][]*memCand)
+			byUser[c.user] = new([classes][]*memCand)
 		}
 		byUser[c.user][c.class] = append(byUser[c.user][c.class], c)
 	}
@@ -556,13 +681,16 @@ func pick(snap memSnapshot, want int64) []*tunnelMem {
 			}
 			taken[c] = true
 			out = append(out, c.tm)
-			freed += tunnelCost + c.held
-			if !c.down {
-				// Its window part: what the group's comes down by.
-				g := snap.groups[c.g]
-				freed += min(g.limit, g.counted*g.w) - min(g.limit, (g.counted-1)*g.w)
+			// Its window part: what the group's comes down by.
+			g := snap.groups[c.g]
+			before := g.charge()
+			if c.counted {
 				g.counted--
 			}
+			if c.uploading {
+				g.uploading--
+			}
+			freed += tunnelCost + c.held + before - g.charge()
 		}
 	}
 	for _, name := range over {
@@ -576,10 +704,16 @@ func pick(snap memSnapshot, want int64) []*tunnelMem {
 		take(byUser[name][classPending])
 		take(byUser[name][classSlow])
 	}
+	var reading []*memCand
+	for _, name := range over {
+		reading = append(reading, byUser[name][classReading]...)
+	}
+	slices.SortFunc(reading, func(a, b *memCand) int { return cmp.Compare(a.since, b.since) })
+	take(reading)
 	for _, name := range under {
 		take(byUser[name][classStuck])
 	}
-	return out
+	return out, freed
 }
 
 // evict resets the streams: their charge goes at once, and their tunnels
@@ -693,6 +827,19 @@ func (s *Server) WatchMemory(ctx context.Context) {
 			t.tick()
 		}
 	}
+}
+
+// stampReader notes when each read began in since, and 0 once it is done.
+type stampReader struct {
+	r     io.Reader
+	since *atomic.Int64
+}
+
+func (s stampReader) Read(b []byte) (int, error) {
+	s.since.Store(mono())
+	n, err := s.r.Read(b)
+	s.since.Store(0)
+	return n, err
 }
 
 // stampWriter notes when each write began in since, and 0 once it is

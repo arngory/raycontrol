@@ -193,34 +193,91 @@ func TestConnContextSockets(t *testing.T) {
 	datagramStream(ctx)()
 }
 
-// Each HTTP/2 connection's socket gets TCP_USER_TIMEOUT (clientTimeout):
-// a client that leaves the server's data unacknowledged that long is gone.
+// An HTTP/2 connection's socket gets TCP_USER_TIMEOUT (clientTimeout) at
+// its first authenticated stream, once: before a password it is the site's
+// socket, as the kernel leaves it.
 func TestClientUserTimeout(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	users := filepath.Join(t.TempDir(), "users.json")
+	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
+	answer, _ := site.Responder(site.Answer404, "")
+	var d net.Dialer
+	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	client, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { echo.Close() })
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c) }()
+		}
+	}()
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config = h.HTTPServer()
+	var mu sync.Mutex
+	var sockets []*connSocket
+	srv.Config.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		ctx = connContext(ctx, c)
+		if cs, _ := ctx.Value(connSocketKey{}).(*connSocket); cs != nil {
+			mu.Lock()
+			sockets = append(sockets, cs)
+			mu.Unlock()
+		}
+		return ctx
 	}
-	defer client.Close()
-	accepted, err := ln.Accept()
-	if err != nil {
-		t.Fatal(err)
+	srv.EnableHTTP2 = true
+	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	tr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: testClientTLS("h2")}
+	t.Cleanup(tr.CloseIdleConnections)
+	connect := func(password string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodConnect, srv.URL, http.NoBody)
+		req.Host = echo.Addr().String()
+		req.Header.Set("Padding", paddingHeader())
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
 	}
-	defer accepted.Close()
-	srv := (&Server{Log: slog.New(slog.DiscardHandler)}).HTTPServer()
-	srv.ConnContext(context.Background(), tls.Server(accepted, &tls.Config{MinVersion: tls.VersionTLS13}))
-	rc, _ := accepted.(*net.TCPConn).SyscallConn()
-	var v int
-	var serr error
-	if err := rc.Control(func(fd uintptr) { v, serr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT) }); err != nil || serr != nil {
-		t.Fatal(err, serr)
+	timeout := func() (int, int) {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(sockets) != 1 {
+			t.Fatalf("%d connections", len(sockets))
+		}
+		cs := sockets[0]
+		var v int
+		var serr error
+		if err := cs.rc.Control(func(fd uintptr) { v, serr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT) }); err != nil || serr != nil {
+			t.Fatal(err, serr)
+		}
+		cs.mu.Lock()
+		defer cs.mu.Unlock()
+		return v, cs.timeouts
 	}
-	if v != int(clientTimeout/time.Millisecond) {
-		t.Fatalf("TCP_USER_TIMEOUT %d ms, want %v", v, clientTimeout)
+	if resp := connect("wrong"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a wrong password: %s", resp.Status)
+	}
+	if v, n := timeout(); v != 0 || n != 0 {
+		t.Fatalf("before a password: TCP_USER_TIMEOUT %d ms, set %d times", v, n)
+	}
+	for range 2 {
+		if resp := connect("pw"); resp.StatusCode != http.StatusOK {
+			t.Fatalf("CONNECT: %s", resp.Status)
+		}
+	}
+	if v, n := timeout(); v != int(clientTimeout/time.Millisecond) || n != 1 {
+		t.Fatalf("after two tunnels: TCP_USER_TIMEOUT %d ms, set %d times, want %v once", v, n, clientTimeout)
 	}
 }
 
@@ -298,5 +355,46 @@ func TestSockMemory(t *testing.T) {
 	defer b.Close()
 	if connMemory(a) != 0 {
 		t.Fatal("a pipe holds kernel memory")
+	}
+}
+
+// A round ranks the downloads blocked on their client by what the kernel
+// holds for their destination's socket (SO_MEMINFO), the larger first.
+func TestEvictRankSockMemory(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	pair := func(n int) net.Conn {
+		t.Helper()
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		s, err := ln.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		go func() { _, _ = c.Write(make([]byte, n)) }()
+		return s // the tunnel's destination, its download unread
+	}
+	small, large := pair(32<<10), pair(256<<10)
+	eventually(t, "the unread bytes not held", func() bool {
+		return connMemory(small) >= 32<<10 && connMemory(large) > connMemory(small)
+	})
+	tn, _ := testTunnels(1 << 30)
+	names := map[*tunnelMem]string{}
+	for name, out := range map[string]net.Conn{"small": small, "large": large} {
+		tm := tn.admit("u5", nil, false, func(error) {})
+		tn.run(tm, out)
+		tm.down.Store(mono() - int64(time.Hour))
+		names[tm] = name
+	}
+	p, freed := pick(tn.snapshot(), 1<<40)
+	if len(p) != 2 || names[p[0]] != "large" || names[p[1]] != "small" || freed < 2*tunnelCost+2*(32<<10) {
+		t.Fatalf("picked %d, first %q, %d freed", len(p), names[p[0]], freed)
 	}
 }

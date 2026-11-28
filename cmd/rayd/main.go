@@ -330,16 +330,12 @@ func cmdServe(args []string) error {
 	// the guard as rayspa reports it.
 	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
 	go srv.ConnLimit.Run(ctx)
-	// naive's datagram requests for rayctl metrics (naive-udp-v1 §7): the
-	// same line as its bytes and refusals, read when the metrics are asked.
-	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
+	// naive's datagram requests (naive-udp-v1 §7) and its TCP tunnels'
+	// memory (memory-v1 §5) for rayctl metrics: the same line as its bytes
+	// and refusals, read once when the metrics are asked.
+	srv.NaiveStats = func(ctx context.Context, service string) (*naive.UDPStats, *naive.MemoryStats, error) {
 		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
-		return r.UDP, err
-	}
-	// naive's TCP tunnels' memory (memory-v1 §5), on the same line.
-	srv.NaiveMemory = func(ctx context.Context, service string) (*naive.MemoryStats, error) {
-		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
-		return r.Memory, err
+		return r.UDP, r.Memory, err
 	}
 	// rayctl stats (spec/stats-v1.md): the metrics without names and the
 	// host, a sample a minute, two hours of them in memory.

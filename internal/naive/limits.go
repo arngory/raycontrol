@@ -270,7 +270,8 @@ func (l *limits) tcpStart(ctx context.Context, user string) (done func(), kind s
 }
 
 // waitAttempt takes an attempt token, waiting for one up to tcpWait while
-// ctx lasts; a refusal is counted.
+// ctx lasts; a refusal is counted, but not one because ctx ended (the
+// stream did: not the rate's doing).
 func (l *limits) waitAttempt(ctx context.Context, user string, u *limUser) bool {
 	start := l.clock()
 	for {
@@ -283,14 +284,17 @@ func (l *limits) waitAttempt(ctx context.Context, user string, u *limUser) bool 
 		// Until the next token comes.
 		// A millisecond at least: a float's dust must not spin the loop.
 		need := max(time.Millisecond, time.Duration((1-u.attempts.tokens)/tcpRate*float64(time.Second)))
-		if now.Add(need).Sub(start) > tcpWait || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			l.mu.Unlock()
+			return false
+		}
+		if now.Add(need).Sub(start) > tcpWait {
 			l.refuseLocked(user, refusedRate)
 			l.mu.Unlock()
 			return false
 		}
 		l.mu.Unlock()
 		if l.wait(ctx, need) != nil {
-			l.refuse(user, refusedRate)
 			return false
 		}
 	}
