@@ -51,7 +51,8 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
 		ICMP: c.icmpOn(ctx), Ports: chosenPorts(choice)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx),
-		c.sshPortResults(ctx), conntrackResults(conntrackPaths{}), perimeterResult(defaultPerimeterHost), realityTargetResults(c.realityTargetWarnings(ctx)))...)
+		c.sshPortResults(ctx), conntrackResults(conntrackPaths{}), memoryResults(defaultMemoryHost), perimeterResult(defaultPerimeterHost),
+		realityTargetResults(c.realityTargetWarnings(ctx)))...)
 }
 
 // conntrackPaths are where conntrackResults looks (tests give their own).
